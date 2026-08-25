@@ -1,0 +1,9 @@
+.mark { font-size: 16px; }
+.entra { display:flex; align-items:center; justify-content:center; gap:12px; width:100%; padding:11px; border:1px solid #b8bec6; border-radius:7px; color:#222; text-decoration:none; font-weight:650; }
+.ms-logo { display:grid; grid-template-columns:8px 8px; gap:2px; }
+.ms-logo i { width:8px; height:8px; background:#f35325; }
+.ms-logo i:nth-child(2) { background:#81bc06; }
+.ms-logo i:nth-child(3) { background:#05a6f0; }
+.ms-logo i:nth-child(4) { background:#ffba08; }
+.divider { display:flex; align-items:center; gap:12px; color:#8b929c; font-size:11px; margin:20px 0 4px; }
+.divider::before,.divider::after { content:""; height:1px; background:#e1e4e8; flex:1; }

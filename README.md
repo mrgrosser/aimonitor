@@ -1,0 +1,51 @@
+# JO AI Monitor
+
+A Dockerized, read-only evidence explorer for Anthropic's Claude Compliance API. It gives security, legal, and compliance teams a searchable view of Claude.ai chats, Claude Code/Cowork sessions, and activity records, with a verbatim JSON evidence export.
+
+## Run the demo
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open `http://localhost:8080`. The example credentials are `admin` / `change-me-now`; change them in `.env` before any shared deployment.
+
+## Connect Anthropic
+
+1. Have a Claude Enterprise primary/organization owner enable the Compliance API.
+2. Create a Compliance Access Key with `read:compliance_activities`, `read:compliance_user_data`, and optionally `read:compliance_org_data`. Do **not** grant delete scope to this application.
+3. Set `ANTHROPIC_COMPLIANCE_ACCESS_KEY` in `.env`, set `DEMO_MODE=false`, use a strong `SESSION_SECRET`, and restart.
+
+An Admin API key can only read the Activity Feed. Full chat, file, project, directory, and transcript access requires a Compliance Access Key.
+
+## Current capabilities
+
+- Standard username/password login with signed, HTTP-only sessions
+- Server-side Anthropic credential handling (never exposed to the browser)
+- Unified evidence index for chats, local Claude Code/Cowork sessions, and remote Cowork sessions
+- Search and filtering, transcript drill-down, Activity Feed and organizations backend endpoints
+- Downloadable JSON evidence envelope with source, exporter, and timestamp
+- Responsive UI, health check, Docker Compose, persistent volume
+- Safe demo mode when no Anthropic key is present
+
+## Production notes
+
+- Terminate TLS at a trusted reverse proxy and set `COOKIE_SECURE=true`.
+- Put the Compliance Access Key in your orchestrator's secret store, not `.env` or an image.
+- This MVP intentionally exposes no Compliance API delete operations.
+- The Compliance API is retrospective. For real-time prompt blocking, use Anthropic Inference Hooks; for live telemetry, consider OpenTelemetry.
+- The current live list is a direct API view. Production evidence retention, case annotations, legal hold, append-only audit logs, and cryptographic export manifests should use a durable database/object store.
+
+## Microsoft Entra ID / SSO
+
+JO AI Monitor supports native OpenID Connect using Entra's authorization-code flow with PKCE. Register a **Web** application in Entra and add the exact redirect URI used by the app, for example `https://ai-monitor.example.com/api/auth/entra/callback`.
+
+1. Create an Entra app registration restricted to your organizational directory.
+2. Add the Web redirect URI above. Do not enable the implicit grant.
+3. Create a client secret for initial deployment; prefer a certificate or workload identity in a later hardening phase.
+4. Define app roles such as `Compliance.Reviewer` and `Compliance.Admin`, then assign users or groups to the enterprise application.
+5. Set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI`, and `ENTRA_ALLOWED_ROLES` in the secret environment.
+6. Start with `LOCAL_AUTH_ENABLED=true`. After validating Entra access and recovery procedures, set it to `false`.
+
+If either `ENTRA_ALLOWED_ROLES` or `ENTRA_ALLOWED_GROUPS` is configured, the app rejects authenticated users who do not match at least one allowlisted value. App roles are recommended because they make the intended authorization boundary explicit and avoid oversized group claims.
