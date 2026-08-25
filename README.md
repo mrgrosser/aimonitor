@@ -28,6 +28,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Downloadable JSON evidence envelope with source, exporter, and timestamp
 - Responsive UI, health check, Docker Compose, persistent volume
 - Safe demo mode when no Anthropic key is present
+- Microsoft 365 Copilot Chat and Copilot-in-Office prompt/response ingestion through Microsoft Graph
 
 ## Production notes
 
@@ -49,3 +50,14 @@ JO AI Monitor supports native OpenID Connect using Entra's authorization-code fl
 6. Start with `LOCAL_AUTH_ENABLED=true`. After validating Entra access and recovery procedures, set it to `false`.
 
 If either `ENTRA_ALLOWED_ROLES` or `ENTRA_ALLOWED_GROUPS` is configured, the app rejects authenticated users who do not match at least one allowlisted value. App roles are recommended because they make the intended authorization boundary explicit and avoid oversized group claims.
+
+## Microsoft 365 Copilot evidence
+
+Use a separate Entra app registration for application-only Microsoft Graph access. Grant and administratively consent to:
+
+- `AiEnterpriseInteraction.Read.All` — reads enterprise Copilot prompts and responses.
+- `User.ReadBasic.All` — enumerates the users whose interaction histories will be queried. This is unnecessary when `M365_COPILOT_USER_IDS` explicitly lists every monitored user.
+
+Configure `M365_COPILOT_TENANT_ID`, `M365_COPILOT_CLIENT_ID`, and `M365_COPILOT_CLIENT_SECRET`. JO AI Monitor obtains an app-only Graph token, queries each user's `interactionHistory/getAllEnterpriseInteractions` endpoint, pairs prompts and responses by request ID, and includes accessed resources in the evidence record.
+
+For a limited pilot, set `M365_COPILOT_USER_IDS` to comma-separated Entra object IDs or UPNs. For tenant-wide discovery, leave it empty and set `M365_COPILOT_MAX_USERS` to the desired safety cap. Only Microsoft 365 experiences that write to the interaction history service are returned; consumer accounts and Copilot Studio agent interactions are outside this API's coverage.

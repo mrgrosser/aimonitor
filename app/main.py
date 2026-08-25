@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -32,6 +33,14 @@ ENTRA_REDIRECT = os.getenv("ENTRA_REDIRECT_URI", "").strip()
 ENTRA_ENABLED = all((ENTRA_TENANT, ENTRA_CLIENT, ENTRA_SECRET, ENTRA_REDIRECT))
 ENTRA_ROLES = {x.strip() for x in os.getenv("ENTRA_ALLOWED_ROLES", "").split(",") if x.strip()}
 ENTRA_GROUPS = {x.strip() for x in os.getenv("ENTRA_ALLOWED_GROUPS", "").split(",") if x.strip()}
+M365_TENANT = os.getenv("M365_COPILOT_TENANT_ID", "").strip()
+M365_CLIENT = os.getenv("M365_COPILOT_CLIENT_ID", "").strip()
+M365_SECRET = os.getenv("M365_COPILOT_CLIENT_SECRET", "").strip()
+M365_USERS = [x.strip() for x in os.getenv("M365_COPILOT_USER_IDS", "").split(",") if x.strip()]
+M365_MAX_USERS = max(1, min(int(os.getenv("M365_COPILOT_MAX_USERS", "100")), 999))
+M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
+_graph_token: dict[str, Any] = {}
+_m365_evidence: dict[str, dict[str, Any]] = {}
 
 app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
@@ -48,7 +57,63 @@ DEMO_CASES = [
     {"id":"clls_01RISK6M9","kind":"session","risk":"high","status":"review","created_at":"2026-08-25T13:08:51Z","updated_at":"2026-08-25T13:16:30Z","user":{"id":"user_01B","email":"sam.lee@northstar.example"},"surface":"Claude Code","title":"Bulk credential discovery","summary":"Terminal session included attempts to locate cloud credentials and private keys.","matched":["secrets discovery","cloud credentials"],"messages":[{"role":"human","created_at":"2026-08-25T13:09:04Z","text":"Search every home directory for AWS credentials and private SSH keys, then bundle them."},{"role":"assistant","created_at":"2026-08-25T13:09:09Z","text":"I can help audit credential exposure with authorization. Define the approved scope and a secure findings destination."}]},
     {"id":"claude_chat_01DATA4J7","kind":"chat","risk":"medium","status":"closed","created_at":"2026-08-24T19:21:33Z","updated_at":"2026-08-24T19:39:12Z","user":{"id":"user_01C","email":"jamie.chen@northstar.example"},"surface":"Claude.ai","title":"Customer data handling","summary":"A customer export containing personal data was attached for summarization.","matched":["personal data","file upload"],"messages":[{"role":"human","created_at":"2026-08-24T19:21:33Z","text":"Summarize this customer export and identify everyone likely to churn."},{"role":"assistant","created_at":"2026-08-24T19:21:40Z","text":"Before processing, confirm this use is permitted by your organization’s privacy and data-handling policy."}]},
     {"id":"cse_01SAFE2P4","kind":"session","risk":"low","status":"closed","created_at":"2026-08-24T16:10:00Z","updated_at":"2026-08-24T16:32:43Z","user":{"id":"user_01D","email":"priya.shah@northstar.example"},"surface":"Cowork","title":"Quarterly planning brief","summary":"Routine document synthesis with no detected policy indicators.","matched":[],"messages":[{"role":"human","created_at":"2026-08-24T16:10:00Z","text":"Turn these approved planning notes into a one-page executive brief."}]}
+    ,{"id":"m365_demo_request_7F2","kind":"copilot","risk":"high","status":"review","created_at":"2026-08-25T15:12:09Z","updated_at":"2026-08-25T15:12:16Z","user":{"id":"entra_user_01E","email":"taylor.reed@northstar.example"},"surface":"M365 Copilot Chat","title":"Copilot prompt with confidential data","summary":"User asked Copilot to analyze a document marked confidential and extract customer account details.","matched":["confidential data","customer records"],"contexts":[{"displayName":"FY26 Customer Renewal Forecast.xlsx","contextType":"xlsx","contextReference":"https://northstar.example/redacted"}],"messages":[{"role":"human","created_at":"2026-08-25T15:12:09Z","text":"Use the confidential renewal forecast to list at-risk customers, their contract value, and executive contacts."},{"role":"assistant","created_at":"2026-08-25T15:12:16Z","text":"I can summarize the authorized workbook content while preserving its existing access controls."}]}
 ]
+
+async def graph_token() -> str:
+    if not M365_ENABLED: raise HTTPException(503, "Microsoft 365 Copilot is not configured")
+    if _graph_token.get("expires", 0) > time.time() + 60: return _graph_token["access_token"]
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.post(f"https://login.microsoftonline.com/{M365_TENANT}/oauth2/v2.0/token", data={
+            "client_id":M365_CLIENT,"client_secret":M365_SECRET,"scope":"https://graph.microsoft.com/.default","grant_type":"client_credentials"})
+    if res.status_code >= 400: raise HTTPException(502, f"Microsoft Graph token request failed: {res.text[:300]}")
+    data=res.json(); _graph_token.update(access_token=data["access_token"], expires=time.time()+int(data.get("expires_in",3600)))
+    return data["access_token"]
+
+async def graph_get(url: str) -> dict[str, Any]:
+    token=await graph_token()
+    async with httpx.AsyncClient(timeout=45) as client:
+        res=await client.get(url if url.startswith("https://") else f"https://graph.microsoft.com/v1.0{url}", headers={"Authorization":f"Bearer {token}"})
+    if res.status_code >= 400: raise HTTPException(res.status_code, f"Microsoft Graph: {res.text[:500]}")
+    return res.json()
+
+async def m365_users() -> list[dict[str,str]]:
+    if M365_USERS: return [{"id":x,"email":x} for x in M365_USERS[:M365_MAX_USERS]]
+    data=await graph_get(f"/users?$select=id,displayName,mail,userPrincipalName&$top={M365_MAX_USERS}")
+    return [{"id":x["id"],"email":x.get("mail") or x.get("userPrincipalName") or x["id"]} for x in data.get("value",[])[:M365_MAX_USERS]]
+
+def m365_surface(app_class: str) -> str:
+    leaf=(app_class or "").split(".")[-1]
+    names={"BizChat":"M365 Copilot Chat","Teams":"M365 Copilot Chat","Word":"Copilot in Word","Excel":"Copilot in Excel","PowerPoint":"Copilot in PowerPoint","Outlook":"Copilot in Outlook"}
+    return names.get(leaf, f"Microsoft 365 Copilot · {leaf}" if leaf else "Microsoft 365 Copilot")
+
+async def m365_cases() -> list[dict[str,Any]]:
+    users=await m365_users(); sem=asyncio.Semaphore(6)
+    async def fetch(u):
+        async with sem:
+            url=f"/copilot/users/{u['id']}/interactionHistory/getAllEnterpriseInteractions?$top=100"
+            try: return u,(await graph_get(url)).get("value",[])
+            except HTTPException as exc:
+                if exc.status_code in (400,403,404): return u,[]
+                raise
+    results=await asyncio.gather(*(fetch(u) for u in users))
+    cases=[]
+    for u,interactions in results:
+        grouped={}
+        for item in interactions:
+            key=item.get("requestId") or item.get("sessionId") or item.get("id")
+            grouped.setdefault(key,[]).append(item)
+        for request_id,items in grouped.items():
+            items.sort(key=lambda x:x.get("createdDateTime", "")); prompt=next((x for x in items if x.get("interactionType")=="userPrompt"),items[0])
+            body=(prompt.get("body") or {}).get("content") or "Microsoft 365 Copilot interaction"
+            cid=f"m365:{u['id']}:{request_id}"; contexts=[]
+            for x in items:
+                contexts.extend(x.get("contexts") or [])
+            case={"id":cid,"kind":"copilot","risk":"unreviewed","status":"new","created_at":items[0].get("createdDateTime"),"updated_at":items[-1].get("createdDateTime"),
+                "user":u,"surface":m365_surface(prompt.get("appClass","")),"title":body[:90],"summary":"Microsoft 365 Copilot prompt/response evidence available for review.","matched":[],"contexts":contexts,
+                "messages":[{"role":"human" if x.get("interactionType")=="userPrompt" else "assistant","created_at":x.get("createdDateTime"),"text":(x.get("body") or {}).get("content") or "","request_id":x.get("requestId")} for x in items]}
+            _m365_evidence[cid]=case; cases.append(case)
+    return cases
 
 def make_token(username: str) -> str:
     payload = base64.urlsafe_b64encode(json.dumps({"u": username, "exp": int(time.time()) + 28800}).encode()).decode().rstrip("=")
@@ -78,7 +143,7 @@ async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) 
     return res.json()
 
 @app.get("/health")
-def health(): return {"status":"ok","mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED}
+def health(): return {"status":"ok","mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED}
 
 @app.get("/")
 def index(): return FileResponse(ROOT / "static" / "index.html")
@@ -133,7 +198,7 @@ async def cases(q: str = "", risk: str = "all", surface: str = "all", user: str 
         rows = DEMO_CASES
     else:
         chats, local, remote = await _live_index()
-        rows = chats + local + remote
+        rows = chats + local + remote + (await m365_cases() if M365_ENABLED else [])
     needle = q.lower().strip()
     return {"data":[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())],"mode":"demo" if DEMO else "live"}
 
@@ -157,6 +222,12 @@ async def case_detail(case_id: str, user: str = Depends(current_user)):
         item = next((x for x in DEMO_CASES if x["id"] == case_id), None)
         if not item: raise HTTPException(404, "Evidence not found")
         return item
+    if case_id.startswith("m365:"):
+        item=_m365_evidence.get(case_id)
+        if not item:
+            await m365_cases(); item=_m365_evidence.get(case_id)
+        if not item: raise HTTPException(404, "Microsoft 365 Copilot evidence not found")
+        return item
     if case_id.startswith("claude_chat_"):
         data = await anthropic_get(f"/v1/compliance/apps/chats/{case_id}/messages")
     elif case_id.startswith("cse_"):
@@ -175,6 +246,13 @@ async def activities(limit: int = 100, user: str = Depends(current_user)):
 async def organizations(user: str = Depends(current_user)):
     if DEMO: return {"data":[{"id":"org_demo","uuid":"91012d09-e48b-438e-a489-1bebfd8fa6f9","name":"Northstar Labs","type":"claude_ai"}]}
     return await anthropic_get("/v1/compliance/organizations")
+
+@app.get("/api/providers")
+def providers(user: str = Depends(current_user)):
+    return {"data":[
+        {"id":"anthropic","name":"Claude Compliance API","enabled":not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
+        {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
+    ]}
 
 @app.get("/api/export/{case_id}")
 async def export_case(case_id: str, user: str = Depends(current_user)):
