@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record_suppressed, score_evidence, suppressed_count, verify_chain
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -45,6 +46,7 @@ _m365_evidence: dict[str, dict[str, Any]] = {}
 app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+init_db()
 
 oauth = OAuth()
 if ENTRA_ENABLED:
@@ -153,13 +155,18 @@ async def login(request: Request):
     if not LOCAL_AUTH: raise HTTPException(404, "Local authentication is disabled")
     body = await request.json()
     if not (hmac.compare_digest(str(body.get("username", "")), USERNAME) and hmac.compare_digest(str(body.get("password", "")), PASSWORD)):
+        audit(str(body.get("username") or "unknown"),"login_failed","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
         raise HTTPException(401, "Invalid username or password")
     response = JSONResponse({"user": USERNAME})
     response.set_cookie("cm_session", make_token(USERNAME), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
+    audit(USERNAME,"login_succeeded","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"method":"local"})
     return response
 
 @app.post("/api/auth/logout")
 def logout(request: Request):
+    try: actor=current_user(request)
+    except HTTPException: actor="unknown"
+    audit(actor,"logout","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     request.session.clear()
     response = JSONResponse({"ok": True}); response.delete_cookie("cm_session"); response.delete_cookie("jo_oauth"); return response
 
@@ -187,20 +194,43 @@ async def entra_callback(request: Request):
     username = claims.get("preferred_username") or claims.get("email") or claims.get("sub")
     response = RedirectResponse("/", status_code=302)
     response.set_cookie("cm_session", make_token(username), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
+    audit(username,"login_succeeded","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"method":"entra","roles":sorted(roles)})
     return response
 
 @app.get("/api/auth/me")
 def me(user: str = Depends(current_user)): return {"user":user,"mode":"demo" if DEMO else "live"}
 
 @app.get("/api/cases")
-async def cases(q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
+async def cases(request: Request, q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
     if DEMO:
         rows = DEMO_CASES
     else:
         chats, local, remote = await _live_index()
-        rows = chats + local + remote + (await m365_cases() if M365_ENABLED else [])
+        rows = await hydrate_live(chats + local + remote) + (await m365_cases() if M365_ENABLED else [])
+    promoted=[]
+    for row in rows:
+        score_evidence(row)
+        if row["promoted"]: promoted.append(row)
+        else: record_suppressed(row,"m365" if row.get("kind")=="copilot" else "anthropic")
+    rows=promoted
     needle = q.lower().strip()
-    return {"data":[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())],"mode":"demo" if DEMO else "live"}
+    result=[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())]
+    audit(user,"findings_searched","evidence_collection",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"query":q,"risk":risk,"surface":surface,"results":len(result)})
+    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":FINDING_THRESHOLD,"suppressed_count":suppressed_count()}
+
+async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
+    sem=asyncio.Semaphore(8)
+    async def one(item):
+        async with sem:
+            try:
+                if item["kind"]=="chat": data=await anthropic_get(f"/v1/compliance/apps/chats/{item['id']}/messages")
+                elif item["id"].startswith("cse_"): data=await anthropic_get(f"/v1/compliance/apps/sessions/remote/{item['id']}/messages")
+                else: data=await anthropic_get(f"/v1/compliance/apps/sessions/local/{item['id']}/messages")
+                raw=data.get("chat_messages") or data.get("messages") or data.get("data") or []
+                item["messages"]=[{"role":m.get("role") or m.get("sender") or m.get("type"),"created_at":m.get("created_at"),"text":m.get("text") or m.get("content") or ""} for m in raw]
+            except HTTPException: item["messages"]=[]
+            return item
+    return await asyncio.gather(*(one(x) for x in rows))
 
 async def _live_index():
     async def get(path):
@@ -217,45 +247,54 @@ async def _live_index():
     return ([norm(x,"chat","Claude.ai") for x in chats_raw],[norm(x,"session","Claude Code / Cowork") for x in local_raw],[norm(x,"session","Cowork") for x in remote_raw])
 
 @app.get("/api/cases/{case_id}")
-async def case_detail(case_id: str, user: str = Depends(current_user)):
+async def case_detail(case_id: str, request: Request, user: str = Depends(current_user)):
     if DEMO:
         item = next((x for x in DEMO_CASES if x["id"] == case_id), None)
         if not item: raise HTTPException(404, "Evidence not found")
-        return item
+        audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":item.get("surface")}); return score_evidence(item)
     if case_id.startswith("m365:"):
         item=_m365_evidence.get(case_id)
         if not item:
             await m365_cases(); item=_m365_evidence.get(case_id)
         if not item: raise HTTPException(404, "Microsoft 365 Copilot evidence not found")
-        return item
+        audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":item.get("surface")}); return score_evidence(item)
     if case_id.startswith("claude_chat_"):
         data = await anthropic_get(f"/v1/compliance/apps/chats/{case_id}/messages")
     elif case_id.startswith("cse_"):
         data = await anthropic_get(f"/v1/compliance/apps/sessions/remote/{case_id}/messages")
     else:
         data = await anthropic_get(f"/v1/compliance/apps/sessions/local/{case_id}/messages")
-    return data
+    audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent","")); return data
 
 @app.get("/api/activities")
-async def activities(limit: int = 100, user: str = Depends(current_user)):
+async def activities(request: Request, limit: int = 100, user: str = Depends(current_user)):
+    audit(user,"activity_feed_viewed","activity_feed",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"limit":limit})
     if DEMO:
         return {"data":[{"id":"activity_demo_"+str(i),"created_at":x["created_at"],"type":"claude_chat_created" if x["kind"]=="chat" else "session_created","actor":{"type":"user_actor","email_address":x["user"]["email"]},"resource_id":x["id"]} for i,x in enumerate(DEMO_CASES)]}
     return await anthropic_get("/v1/compliance/activities", [("limit",str(min(limit,5000)))])
 
 @app.get("/api/organizations")
-async def organizations(user: str = Depends(current_user)):
+async def organizations(request: Request, user: str = Depends(current_user)):
+    audit(user,"directory_viewed","directory",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     if DEMO: return {"data":[{"id":"org_demo","uuid":"91012d09-e48b-438e-a489-1bebfd8fa6f9","name":"Northstar Labs","type":"claude_ai"}]}
     return await anthropic_get("/v1/compliance/organizations")
 
 @app.get("/api/providers")
-def providers(user: str = Depends(current_user)):
+def providers(request: Request, user: str = Depends(current_user)):
+    audit(user,"providers_viewed","configuration",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     return {"data":[
         {"id":"anthropic","name":"Claude Compliance API","enabled":not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
         {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
     ]}
 
+@app.get("/api/audit")
+def audit_log(request: Request, limit: int = 200, actor: str = "", action: str = "", user: str = Depends(current_user)):
+    audit(user,"audit_log_viewed","audit_log",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"actor_filter":actor,"action_filter":action,"limit":limit})
+    return {"data":read_audit(limit,actor,action),"chain_valid":verify_chain()}
+
 @app.get("/api/export/{case_id}")
-async def export_case(case_id: str, user: str = Depends(current_user)):
-    data = await case_detail(case_id, user)
+async def export_case(case_id: str, request: Request, user: str = Depends(current_user)):
+    data = await case_detail(case_id, request, user)
+    audit(user,"evidence_exported","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":"json"})
     payload = json.dumps({"exported_at":time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),"exported_by":user,"source":"Anthropic Compliance API","evidence":data}, indent=2)
     return Response(payload, media_type="application/json", headers={"Content-Disposition":f'attachment; filename="evidence-{case_id}.json"'})

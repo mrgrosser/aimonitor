@@ -4,9 +4,10 @@ services:
     ports:
       - "8080:8080"
     env_file: .env
+    environment:
+      DATABASE_PATH: /data/jo-ai-monitor.db
     volumes:
       - claude-monitor-data:/data
     restart: unless-stopped
 volumes:
   claude-monitor-data:
-

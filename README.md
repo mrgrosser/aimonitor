@@ -61,3 +61,23 @@ Use a separate Entra app registration for application-only Microsoft Graph acces
 Configure `M365_COPILOT_TENANT_ID`, `M365_COPILOT_CLIENT_ID`, and `M365_COPILOT_CLIENT_SECRET`. JO AI Monitor obtains an app-only Graph token, queries each user's `interactionHistory/getAllEnterpriseInteractions` endpoint, pairs prompts and responses by request ID, and includes accessed resources in the evidence record.
 
 For a limited pilot, set `M365_COPILOT_USER_IDS` to comma-separated Entra object IDs or UPNs. For tenant-wide discovery, leave it empty and set `M365_COPILOT_MAX_USERS` to the desired safety cap. Only Microsoft 365 experiences that write to the interaction history service are returned; consumer accounts and Copilot Studio agent interactions are outside this API's coverage.
+
+## Risk thresholding
+
+Every record is evaluated by an explainable 0–100 rules engine before it enters the findings queue. The response includes `risk_score`, `risk_factors`, and `risk_rule_version`; the interface displays the score beside its severity.
+
+- 80–100: critical
+- 60–79: high
+- 40–59: medium
+- 20–39: low
+- 0–19: informational
+
+Set `RISK_FINDING_THRESHOLD` to the minimum score that should become a full finding (default `40`). Below-threshold content is not retained by JO AI Monitor. Only minimal suppression metadata is stored: source evidence ID, provider, user ID, surface, score, rule version, observation time, and suppression reason. The upstream provider remains the system of record.
+
+The initial rules detect unauthorized access, evasion, credential exposure, production targeting, data exfiltration, regulated/personal data, confidential information, malware/exploit requests, and destructive actions. Treat the supplied weights as a transparent starting policy requiring organizational review before production.
+
+## Access audit
+
+JO AI Monitor writes an append-only audit event for local and Entra sign-ins, failed sign-ins, sign-outs, searches and filters, evidence views, exports, provider views, directory/activity access, and audit-log access. Each event includes actor, timestamp, source IP, user agent, action, object, and structured context.
+
+Audit entries form a SHA-256 hash chain: every record includes the prior record's hash, and `/api/audit` verifies the chain before returning results. The **Access audit** navigation item displays the ledger and its current integrity status. Persist `DATABASE_PATH` on durable storage; Docker Compose maps it to `/data/jo-ai-monitor.db`.
