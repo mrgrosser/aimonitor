@@ -25,6 +25,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
+APP_VERSION = os.getenv("APP_VERSION", "0.4.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -47,6 +48,14 @@ app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 init_db()
+
+@app.middleware("http")
+async def prevent_stale_frontend(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 oauth = OAuth()
 if ENTRA_ENABLED:
@@ -145,7 +154,7 @@ async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) 
     return res.json()
 
 @app.get("/health")
-def health(): return {"status":"ok","mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED}
+def health(): return {"status":"ok","version":APP_VERSION,"mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED}
 
 @app.get("/")
 def index(): return FileResponse(ROOT / "static" / "index.html")
@@ -171,7 +180,7 @@ def logout(request: Request):
     response = JSONResponse({"ok": True}); response.delete_cookie("cm_session"); response.delete_cookie("jo_oauth"); return response
 
 @app.get("/api/auth/config")
-def auth_config(): return {"entra_enabled":ENTRA_ENABLED,"local_enabled":LOCAL_AUTH}
+def auth_config(): return {"entra_enabled":ENTRA_ENABLED,"local_enabled":LOCAL_AUTH,"version":APP_VERSION}
 
 @app.get("/api/auth/entra/login")
 async def entra_login(request: Request):

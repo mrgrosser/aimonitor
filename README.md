@@ -11,6 +11,17 @@ docker compose up --build
 
 Open `http://localhost:8080`. The example credentials are `admin` / `change-me-now`; change them in `.env` before any shared deployment.
 
+## Update an existing deployment
+
+A GitHub push does not automatically rebuild an existing Docker container. From the deployment checkout, run:
+
+```bash
+git pull origin main
+docker compose up -d --build --force-recreate
+```
+
+Then open `/health` and confirm the reported `version` is `0.4.0`. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+
 ## Connect Anthropic
 
 1. Have a Claude Enterprise primary/organization owner enable the Compliance API.
