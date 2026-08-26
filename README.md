@@ -4,6 +4,8 @@ A Dockerized, read-only evidence explorer for Anthropic's Claude Compliance API.
 
 See [ROADMAP.md](ROADMAP.md) for delivered capabilities, planned milestones, and the Security and Compliance approval gates required before production use.
 
+See [SCORING.md](SCORING.md) for the current deterministic scoring formula, a worked threat example, and the proposed hybrid rules-plus-model architecture.
+
 ## Run the demo
 
 ```bash
@@ -22,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.7.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.7.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 

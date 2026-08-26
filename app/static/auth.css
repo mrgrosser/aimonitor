@@ -41,6 +41,13 @@
 .info-table .sub { display:block; margin-top:3px; }
 .modal-message { padding:34px; color:#697386; text-align:center; }
 #infoStatus { color:#697386; font-size:12px; }
+.section-page { grid-column:2; grid-row:1; min-width:0; padding:30px 36px; }
+.section-page .modal-card { width:100%; max-height:none; overflow:visible; border:1px solid #e1e5ea; border-radius:10px; box-shadow:none; }
+.section-page .modal-head { padding:22px 25px; background:#fff; border-radius:10px 10px 0 0; }
+.section-page #infoClose { display:none; }
+.section-page .info-body { max-height:none; overflow:visible; }
+.audit-page-table { overflow:auto; }
+.audit-page-table tbody tr { cursor:default; }
 .build-version { margin:12px 0 8px; color:#8390a0; font:600 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.025em; }
 .usage-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px; }
 .usage-tools { position:sticky; top:-22px; z-index:4; display:flex; justify-content:space-between; align-items:flex-end; gap:14px; margin:-22px -25px 16px; padding:13px 25px; border-bottom:1px solid #e1e5ea; background:#fffffff2; backdrop-filter:blur(8px); }
@@ -93,3 +100,4 @@
 @media (max-width:520px) { .usage-kpis { grid-template-columns:1fr; } }
 @media (max-width:720px) { .detail.open { display:block; width:100vw; } }
 @media (max-width:650px) { .usage-tools { position:static; align-items:stretch; flex-direction:column; margin:-14px -14px 14px; padding:12px 14px; } .usage-actions { justify-content:flex-start; } }
+@media (max-width:720px) { .section-page { grid-column:1; padding:20px; } }

@@ -13,11 +13,11 @@ FINDING_THRESHOLD = max(0, min(int(os.getenv("RISK_FINDING_THRESHOLD", "40")), 1
 _lock = threading.Lock()
 
 RULES = [
-    ("unauthorized_access", 45, r"\b(hack|unauthorized|bypass|break into|gain access|root access|privilege escalat)\b"),
+    ("unauthorized_access", 45, r"\b(hack|unauthorized|bypass|break into|gain access|root access|privilege escalat\w*)\b"),
     ("evasion", 20, r"\b(without (?:the )?(?:admin|owner|security).{0,20}(?:knowing|noticing)|hide (?:my|the) (?:tracks|activity)|evade detection|cover (?:my|the) tracks)\b"),
     ("credential_exposure", 25, r"\b(passwords?|api[- ]?keys?|access tokens?|private keys?|aws credentials?|secrets?)\b"),
     ("production_target", 15, r"\b(prod(?:uction)?|live server|customer environment)\b"),
-    ("data_exfiltration", 25, r"\b(exfiltrat|steal|bundle them|upload.{0,20}(?:external|personal)|send.{0,20}(?:outside|personal))\b"),
+    ("data_exfiltration", 25, r"\b(exfiltrat\w*|steal|bundle them|upload.{0,20}(?:external|personal)|send.{0,20}(?:outside|personal))\b"),
     ("regulated_or_personal_data", 20, r"\b(ssn|social security|credit card|patient|medical record|phi|pii|personal data)\b"),
     ("confidential_information", 40, r"\b(confidential|trade secret|proprietary|customer records?|source code)\b"),
     ("malware_or_exploit", 30, r"\b(ransomware|malware|keylogger|reverse shell|zero[- ]day|exploit code|payload)\b"),
@@ -79,7 +79,7 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
     for name,points,pattern in RULES:
         if re.search(pattern,text,re.I): score+=points; factors.append({"id":name,"points":points})
     score=min(score,100); severity="critical" if score>=80 else "high" if score>=60 else "medium" if score>=40 else "low" if score>=20 else "informational"
-    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version="rules-2026.08.1",promoted=score>=FINDING_THRESHOLD)
+    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version="rules-2026.08.2",promoted=score>=FINDING_THRESHOLD)
     return item
 
 def record_suppressed(item: dict[str,Any], provider: str) -> None:
