@@ -33,4 +33,5 @@
 .info-table .sub { display:block; margin-top:3px; }
 .modal-message { padding:34px; color:#697386; text-align:center; }
 #infoStatus { color:#697386; font-size:12px; }
+.build-version { margin:12px 0 8px; color:#8390a0; font:600 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.025em; }
 @media (max-width:700px) { .modal { padding:10px; } .info-body { padding:14px; } .info-grid { grid-template-columns:1fr; } }
