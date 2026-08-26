@@ -15,7 +15,7 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Use read-only provider permissions unless a separately approved control requires write access.
 - Support multiple AI providers through a normalized evidence and usage model.
 
-## Delivered: v0.1–v0.7
+## Delivered: v0.1–v0.8
 
 - Docker and Docker Compose deployment, including Komodo/Gitea-compatible local image builds.
 - Standard authentication with signed HTTP-only sessions.
@@ -63,7 +63,7 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Named-user sections require an approved role and are omitted by default.
 - Re-running an identical import does not duplicate the reporting period.
 
-## v0.8: Investigation and case management
+## v0.8: Investigation and case management — delivered
 
 **Goal:** Turn detected findings into a complete analyst review workflow.
 
@@ -79,14 +79,19 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Audited case creation, search, views, updates, notes, links, and exports.
 - Full-page analyst queue and case-detail interface, including seeded demo investigations.
 
-### Remaining v0.8 capabilities
+### Delivered in v0.8.1
 
-- Threaded comments and file attachments.
-- Custom categories and escalation state.
-- Bulk assignment, tagging, status changes, and export.
-- Additional time-window controls for related-finding correlation.
-- Legal hold and preservation workflow.
-- Saved searches and reviewer queues.
+- Threaded comments and type/size-restricted, SHA-256-hashed file attachments.
+- Custom categories and escalation states for watch, management, incident response, and legal review.
+- Reason-required bulk assignment, tagging, status, priority, and escalation changes plus bulk ZIP export.
+- Configurable time-window controls for related-finding correlation.
+- Administrator-controlled legal holds with reasons and audited release.
+- Saved personal/shared reviewer queues with persisted filters.
+- Entra role enforcement separating case readers, investigators, and legal-hold administrators.
+
+### v0.7 completion audit
+
+The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports retain duplicate protection and reconciliation warnings; reports retain actor, generation time, source, filters, and version metadata; Copilot interactions and Claude requests remain separate units; named-user reports remain role-restricted and excluded by default; and identical imports do not duplicate reporting periods.
 
 ### Acceptance criteria
 

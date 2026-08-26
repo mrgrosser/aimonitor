@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.8.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.8.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -75,6 +75,8 @@ Named identities are excluded by default. Set `NAMED_USER_REPORT_ROLES` to the a
 Version 0.8 introduces a persistent analyst workflow on the **Cases** page. Findings can be snapshotted into a case and managed through New, Investigating, Confirmed, Benign, Accepted Risk, and Closed states. Cases include priority, assignee, due date, tags, analyst notes, related-finding suggestions, and PDF/JSON evidence packages. Benign, accepted-risk, and closed outcomes require a disposition reason.
 
 Original provider evidence is preserved separately from analyst commentary. Each creation, evidence link, assignment, workflow change, note, and export records its actor and timestamp in both the case timeline and the application audit ledger. Demo mode seeds three investigation cases so the workflow is immediately usable during leadership reviews.
+
+Version 0.8.1 completes the investigation milestone with threaded comments, hashed attachments, legal holds, custom categories, escalation states, time-aware correlation, reason-required bulk changes, bulk ZIP exports, and saved reviewer queues. Configure `CASE_READ_ROLES` and `CASE_WRITE_ROLES` to enforce Entra application-role boundaries. Legal-hold changes require `Compliance.Admin`; local admin retains emergency/evaluation access. Attachments are type- and size-restricted and stored under `ATTACHMENT_PATH` on the persistent volume.
 
 ## Production notes
 

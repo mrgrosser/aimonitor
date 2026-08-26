@@ -2,11 +2,13 @@ import base64
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
 import secrets
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record_suppressed, score_evidence, suppressed_count, verify_chain
 from app.usage_reporting import get_usage_period, init_usage_db, list_usage_periods, parse_usage_file, save_usage_period, usage_csv, usage_html, usage_pdf
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
-from app.case_management import add_note, case_pdf, create_case, get_case, init_case_db, link_finding, list_cases, update_case
+from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -30,7 +32,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.8.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.8.1")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -46,6 +48,8 @@ M365_SECRET = os.getenv("M365_COPILOT_CLIENT_SECRET", "").strip()
 M365_USERS = [x.strip() for x in os.getenv("M365_COPILOT_USER_IDS", "").split(",") if x.strip()]
 M365_MAX_USERS = max(1, min(int(os.getenv("M365_COPILOT_MAX_USERS", "100")), 999))
 M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
+CASE_READ_ROLES = {x.strip() for x in os.getenv("CASE_READ_ROLES","Compliance.Admin,Compliance.Investigator,Compliance.Reviewer,Compliance.Auditor").split(",") if x.strip()}
+CASE_WRITE_ROLES = {x.strip() for x in os.getenv("CASE_WRITE_ROLES","Compliance.Admin,Compliance.Investigator").split(",") if x.strip()}
 _graph_token: dict[str, Any] = {}
 _m365_evidence: dict[str, dict[str, Any]] = {}
 
@@ -319,11 +323,26 @@ async def entra_callback(request: Request):
 @app.get("/api/auth/me")
 def me(request: Request, user: str = Depends(current_user)):
     identity=current_identity(request)
-    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES)}
+    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
 
 def can_view_named_users(request: Request) -> bool:
     identity=current_identity(request)
     return identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES)
+
+def case_reader(request: Request) -> str:
+    identity=current_identity(request)
+    if identity["method"]!="local" and not (identity["roles"] & CASE_READ_ROLES): raise HTTPException(403,"A case-review role is required")
+    return identity["user"]
+
+def case_writer(request: Request) -> str:
+    identity=current_identity(request)
+    if identity["method"]!="local" and not (identity["roles"] & CASE_WRITE_ROLES): raise HTTPException(403,"An Investigator or Administrator role is required")
+    return identity["user"]
+
+def case_admin(request: Request) -> str:
+    identity=current_identity(request)
+    if identity["method"]!="local" and "Compliance.Admin" not in identity["roles"]: raise HTTPException(403,"A Compliance Administrator role is required")
+    return identity["user"]
 
 async def collect_findings() -> list[dict[str, Any]]:
     if DEMO: rows=[dict(x) for x in DEMO_CASES]
@@ -398,27 +417,27 @@ def _case_or_404(case_id: int) -> dict[str, Any]:
     except KeyError: raise HTTPException(404,"Investigation case not found")
 
 @app.get("/api/investigations")
-def investigations(request: Request, status: str = "all", assignee: str = "", q: str = "", user: str = Depends(current_user)):
-    rows=list_cases(status,assignee,q); audit(user,"cases_searched","investigation_case",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"status":status,"assignee":assignee,"query":q,"results":len(rows)})
+def investigations(request: Request, status: str = "all", assignee: str = "", q: str = "", priority: str = "all", category: str = "", escalation: str = "all", user: str = Depends(case_reader)):
+    rows=list_cases(status,assignee,q,priority,category,escalation); audit(user,"cases_searched","investigation_case",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"status":status,"assignee":assignee,"query":q,"priority":priority,"category":category,"escalation":escalation,"results":len(rows)})
     return {"data":rows,"statuses":["new","investigating","confirmed","benign","accepted_risk","closed"],"priorities":["critical","high","medium","low"]}
 
 @app.post("/api/investigations")
-async def create_investigation(request: Request, user: str = Depends(current_user)):
+async def create_investigation(request: Request, user: str = Depends(case_writer)):
     body=await request.json(); finding=None; finding_id=str(body.get("finding_id") or "")
     if finding_id:
         finding=next((x for x in await collect_findings() if x.get("id")==finding_id),None)
         if not finding: raise HTTPException(404,"Finding not found")
-    try: case=create_case(str(body.get("title") or (finding or {}).get("title") or ""),str(body.get("description") or ""),str(body.get("priority") or (finding or {}).get("risk") or "medium"),str(body.get("assignee") or ""),body.get("due_at"),body.get("tags") or [],user,finding)
+    try: case=create_case(str(body.get("title") or (finding or {}).get("title") or ""),str(body.get("description") or ""),str(body.get("priority") or (finding or {}).get("risk") or "medium"),str(body.get("assignee") or ""),body.get("due_at"),body.get("tags") or [],user,finding,str(body.get("category") or "security_review"))
     except ValueError as exc: raise HTTPException(400,str(exc))
     audit(user,"case_created","investigation_case",str(case["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"finding_id":finding_id,"priority":case["priority"]})
     return case
 
 @app.get("/api/investigations/{case_id}")
-def investigation_detail(case_id: int, request: Request, user: str = Depends(current_user)):
+def investigation_detail(case_id: int, request: Request, user: str = Depends(case_reader)):
     case=_case_or_404(case_id); audit(user,"case_viewed","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return case
 
 @app.patch("/api/investigations/{case_id}")
-async def update_investigation(case_id: int, request: Request, user: str = Depends(current_user)):
+async def update_investigation(case_id: int, request: Request, user: str = Depends(case_writer)):
     body=await request.json(); reason=str(body.pop("reason","") or "")
     try: case=update_case(case_id,body,user,reason)
     except KeyError: raise HTTPException(404,"Investigation case not found")
@@ -427,15 +446,78 @@ async def update_investigation(case_id: int, request: Request, user: str = Depen
     return case
 
 @app.post("/api/investigations/{case_id}/notes")
-async def investigation_note(case_id: int, request: Request, user: str = Depends(current_user)):
+async def investigation_note(case_id: int, request: Request, user: str = Depends(case_writer)):
     body=await request.json()
     try: case=add_note(case_id,str(body.get("text") or ""),user)
     except KeyError: raise HTTPException(404,"Investigation case not found")
     except ValueError as exc: raise HTTPException(400,str(exc))
     audit(user,"case_note_added","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return case
 
+@app.post("/api/investigations/{case_id}/comments")
+async def investigation_comment(case_id: int, request: Request, user: str = Depends(case_writer)):
+    body=await request.json()
+    try: case=add_comment(case_id,str(body.get("body") or ""),user,body.get("parent_id"))
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"case_comment_added","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"parent_id":body.get("parent_id")}); return case
+
+@app.post("/api/investigations/{case_id}/attachments")
+async def investigation_attachment(case_id: int, request: Request, file: UploadFile = File(...), user: str = Depends(case_writer)):
+    content=await file.read()
+    try: case=save_attachment(case_id,file.filename or "attachment",file.content_type or "application/octet-stream",content,user)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    attachment=case["attachments"][-1]; audit(user,"case_attachment_added","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"attachment_id":attachment["id"],"filename":attachment["filename"],"sha256":attachment["sha256"]}); return attachment
+
+@app.get("/api/investigations/{case_id}/attachments/{attachment_id}")
+def investigation_attachment_download(case_id: int, attachment_id: int, request: Request, user: str = Depends(case_reader)):
+    try: metadata,path=get_attachment(case_id,attachment_id)
+    except KeyError: raise HTTPException(404,"Attachment not found")
+    audit(user,"case_attachment_downloaded","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"attachment_id":attachment_id,"sha256":metadata["sha256"]}); return FileResponse(path,media_type=metadata["media_type"],filename=metadata["filename"],headers={"Cache-Control":"no-store"})
+
+@app.post("/api/investigations/{case_id}/legal-hold")
+async def investigation_legal_hold(case_id: int, request: Request, user: str = Depends(case_admin)):
+    body=await request.json()
+    try: case=set_legal_hold(case_id,bool(body.get("enabled")),str(body.get("reason") or ""),user)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"legal_hold_changed","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"enabled":case["legal_hold"],"reason":case["legal_hold_reason"]}); return case
+
+@app.post("/api/investigation-actions/bulk")
+async def investigation_bulk(request: Request, user: str = Depends(case_writer)):
+    body=await request.json()
+    try: rows=bulk_update(body.get("case_ids") or [],body.get("changes") or {},user,str(body.get("reason") or ""))
+    except KeyError: raise HTTPException(404,"One or more investigation cases were not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"cases_bulk_updated","investigation_case",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"case_ids":[x["id"] for x in rows],"fields":sorted((body.get("changes") or {}).keys()),"reason":body.get("reason")}); return {"data":rows}
+
+@app.post("/api/investigation-actions/bulk-export")
+async def investigation_bulk_export(request: Request, user: str = Depends(case_reader)):
+    body=await request.json(); ids=sorted({int(x) for x in body.get("case_ids") or []})
+    if not ids: raise HTTPException(400,"Select at least one case")
+    stream=io.BytesIO(); manifest={"exported_at":datetime.now(timezone.utc).isoformat(),"exported_by":user,"version":APP_VERSION,"case_ids":ids}
+    try:
+        with zipfile.ZipFile(stream,"w",zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json",json.dumps(manifest,indent=2))
+            for case_id in ids: archive.writestr(f"case-{case_id}.json",json.dumps(_case_or_404(case_id),indent=2))
+    except HTTPException: raise
+    audit(user,"cases_bulk_exported","investigation_case",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"case_ids":ids,"format":"zip_json"})
+    return Response(stream.getvalue(),media_type="application/zip",headers={"Content-Disposition":'attachment; filename="jo-ai-monitor-cases.zip"',"Cache-Control":"no-store"})
+
+@app.get("/api/investigation-queues")
+def investigation_queues(user: str = Depends(case_reader)): return {"data":list_queues(user)}
+
+@app.post("/api/investigation-queues")
+async def investigation_queue_create(request: Request, user: str = Depends(case_writer)):
+    body=await request.json()
+    try: return save_queue(str(body.get("name") or ""),user,body.get("filters") or {},bool(body.get("shared")))
+    except ValueError as exc: raise HTTPException(400,str(exc))
+
+@app.delete("/api/investigation-queues/{queue_id}")
+def investigation_queue_delete(queue_id: int, user: str = Depends(case_writer)): delete_queue(queue_id,user); return {"ok":True}
+
 @app.post("/api/investigations/{case_id}/findings/{finding_id}")
-async def investigation_link_finding(case_id: int, finding_id: str, request: Request, user: str = Depends(current_user)):
+async def investigation_link_finding(case_id: int, finding_id: str, request: Request, user: str = Depends(case_writer)):
     finding=next((x for x in await collect_findings() if x.get("id")==finding_id),None)
     if not finding: raise HTTPException(404,"Finding not found")
     try: case=link_finding(case_id,finding,user)
@@ -443,21 +525,23 @@ async def investigation_link_finding(case_id: int, finding_id: str, request: Req
     audit(user,"finding_linked_to_case","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"finding_id":finding_id}); return case
 
 @app.get("/api/investigations/{case_id}/related")
-async def investigation_related(case_id: int, user: str = Depends(current_user)):
-    case=_case_or_404(case_id); linked={x.get("id") for x in case["findings"]}; identities={str((x.get("user") or {}).get("id") or (x.get("user") or {}).get("email")) for x in case["findings"]}; factors={f.get("id") for x in case["findings"] for f in x.get("risk_factors",[])}; surfaces={x.get("surface") for x in case["findings"]}
+async def investigation_related(case_id: int, days: int = 30, user: str = Depends(case_reader)):
+    days=max(1,min(days,365)); case=_case_or_404(case_id); linked={x.get("id") for x in case["findings"]}; identities={str((x.get("user") or {}).get("id") or (x.get("user") or {}).get("email")) for x in case["findings"]}; factors={f.get("id") for x in case["findings"] for f in x.get("risk_factors",[])}; surfaces={x.get("surface") for x in case["findings"]}; linked_times=[datetime.fromisoformat(str(x.get("created_at")).replace("Z","+00:00")) for x in case["findings"] if x.get("created_at")]
     candidates=[]
     for finding in await collect_findings():
         if finding.get("id") in linked: continue
-        identity=str((finding.get("user") or {}).get("id") or (finding.get("user") or {}).get("email")); finding_factors={f.get("id") for f in finding.get("risk_factors",[])}; reasons=[]
+        identity=str((finding.get("user") or {}).get("id") or (finding.get("user") or {}).get("email")); finding_factors={f.get("id") for f in finding.get("risk_factors",[])}; reasons=[]; created=datetime.fromisoformat(str(finding.get("created_at")).replace("Z","+00:00")) if finding.get("created_at") else None
+        if created and linked_times and min(abs((created-x).total_seconds()) for x in linked_times)>days*86400: continue
         if identity in identities: reasons.append("same identity")
         overlap=sorted(factors & finding_factors)
         if overlap: reasons.append("shared indicators: "+", ".join(overlap))
         if finding.get("surface") in surfaces: reasons.append("same provider surface")
+        if created and linked_times: reasons.append(f"within {days}-day window")
         if reasons: candidates.append({**finding,"relation_reasons":reasons,"relation_score":(3 if identity in identities else 0)+len(overlap)*2+(1 if finding.get("surface") in surfaces else 0)})
     candidates.sort(key=lambda x:(x["relation_score"],x.get("risk_score",0)),reverse=True); return {"data":candidates[:25]}
 
 @app.get("/api/investigations/{case_id}/export")
-def investigation_export(case_id: int, request: Request, report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
+def investigation_export(case_id: int, request: Request, report_format: str = Query("pdf",alias="format"), user: str = Depends(case_reader)):
     case=_case_or_404(case_id); report_format=report_format.lower()
     if report_format=="pdf": payload=case_pdf(case,user,APP_VERSION); media="application/pdf"; ext="pdf"
     elif report_format=="json": payload=json.dumps({"exported_at":datetime.now(timezone.utc).isoformat(),"exported_by":user,"version":APP_VERSION,"case":case},indent=2).encode(); media="application/json"; ext="json"
