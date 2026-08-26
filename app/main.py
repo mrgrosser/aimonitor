@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record_suppressed, score_evidence, suppressed_count, verify_chain
 from app.usage_reporting import get_usage_period, init_usage_db, list_usage_periods, parse_usage_file, save_usage_period, usage_csv, usage_html, usage_pdf
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
+from app.case_management import add_note, case_pdf, create_case, get_case, init_case_db, link_finding, list_cases, update_case
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -29,7 +30,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.7.2")
+APP_VERSION = os.getenv("APP_VERSION", "0.8.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -54,6 +55,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 init_db()
 init_usage_db()
 init_reporting_db()
+init_case_db()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -123,6 +125,20 @@ def build_demo_cases(count: int = 100) -> list[dict[str, Any]]:
     return cases
 
 DEMO_CASES = build_demo_cases()
+
+def seed_demo_investigations() -> None:
+    if not DEMO or list_cases(): return
+    examples=[
+        ("Production access escalation review","critical","alex.morgan@northstar.example",[0,10,20],"Validate authorization and determine whether incident response is required."),
+        ("Credential discovery campaign","high","sam.lee@northstar.example",[1,7,11],"Review related credential and exfiltration activity across providers."),
+        ("Confidential information handling","high","taylor.reed@northstar.example",[2,4,6],"Confirm business purpose and approved handling controls."),
+    ]
+    for title,priority,assignee,indexes,description in examples:
+        first=score_evidence(dict(DEMO_CASES[indexes[0]])); case=create_case(title,description,priority,assignee,None,["leadership-demo","cross-provider"],"system",first)
+        for index in indexes[1:]: link_finding(case["id"],score_evidence(dict(DEMO_CASES[index])),"system")
+        update_case(case["id"],{"status":"investigating"},"system","Seeded demonstration workflow")
+
+seed_demo_investigations()
 
 DEMO_USAGE = {
     "period":"July 2026","source":"Anonymized leadership demo based on monthly analytics exports",
@@ -376,6 +392,78 @@ async def case_detail(case_id: str, request: Request, user: str = Depends(curren
     else:
         data = await anthropic_get(f"/v1/compliance/apps/sessions/local/{case_id}/messages")
     audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent","")); return data
+
+def _case_or_404(case_id: int) -> dict[str, Any]:
+    try: return get_case(case_id)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+
+@app.get("/api/investigations")
+def investigations(request: Request, status: str = "all", assignee: str = "", q: str = "", user: str = Depends(current_user)):
+    rows=list_cases(status,assignee,q); audit(user,"cases_searched","investigation_case",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"status":status,"assignee":assignee,"query":q,"results":len(rows)})
+    return {"data":rows,"statuses":["new","investigating","confirmed","benign","accepted_risk","closed"],"priorities":["critical","high","medium","low"]}
+
+@app.post("/api/investigations")
+async def create_investigation(request: Request, user: str = Depends(current_user)):
+    body=await request.json(); finding=None; finding_id=str(body.get("finding_id") or "")
+    if finding_id:
+        finding=next((x for x in await collect_findings() if x.get("id")==finding_id),None)
+        if not finding: raise HTTPException(404,"Finding not found")
+    try: case=create_case(str(body.get("title") or (finding or {}).get("title") or ""),str(body.get("description") or ""),str(body.get("priority") or (finding or {}).get("risk") or "medium"),str(body.get("assignee") or ""),body.get("due_at"),body.get("tags") or [],user,finding)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"case_created","investigation_case",str(case["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"finding_id":finding_id,"priority":case["priority"]})
+    return case
+
+@app.get("/api/investigations/{case_id}")
+def investigation_detail(case_id: int, request: Request, user: str = Depends(current_user)):
+    case=_case_or_404(case_id); audit(user,"case_viewed","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return case
+
+@app.patch("/api/investigations/{case_id}")
+async def update_investigation(case_id: int, request: Request, user: str = Depends(current_user)):
+    body=await request.json(); reason=str(body.pop("reason","") or "")
+    try: case=update_case(case_id,body,user,reason)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"case_updated","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"fields":sorted(body),"reason":reason})
+    return case
+
+@app.post("/api/investigations/{case_id}/notes")
+async def investigation_note(case_id: int, request: Request, user: str = Depends(current_user)):
+    body=await request.json()
+    try: case=add_note(case_id,str(body.get("text") or ""),user)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"case_note_added","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return case
+
+@app.post("/api/investigations/{case_id}/findings/{finding_id}")
+async def investigation_link_finding(case_id: int, finding_id: str, request: Request, user: str = Depends(current_user)):
+    finding=next((x for x in await collect_findings() if x.get("id")==finding_id),None)
+    if not finding: raise HTTPException(404,"Finding not found")
+    try: case=link_finding(case_id,finding,user)
+    except KeyError: raise HTTPException(404,"Investigation case not found")
+    audit(user,"finding_linked_to_case","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"finding_id":finding_id}); return case
+
+@app.get("/api/investigations/{case_id}/related")
+async def investigation_related(case_id: int, user: str = Depends(current_user)):
+    case=_case_or_404(case_id); linked={x.get("id") for x in case["findings"]}; identities={str((x.get("user") or {}).get("id") or (x.get("user") or {}).get("email")) for x in case["findings"]}; factors={f.get("id") for x in case["findings"] for f in x.get("risk_factors",[])}; surfaces={x.get("surface") for x in case["findings"]}
+    candidates=[]
+    for finding in await collect_findings():
+        if finding.get("id") in linked: continue
+        identity=str((finding.get("user") or {}).get("id") or (finding.get("user") or {}).get("email")); finding_factors={f.get("id") for f in finding.get("risk_factors",[])}; reasons=[]
+        if identity in identities: reasons.append("same identity")
+        overlap=sorted(factors & finding_factors)
+        if overlap: reasons.append("shared indicators: "+", ".join(overlap))
+        if finding.get("surface") in surfaces: reasons.append("same provider surface")
+        if reasons: candidates.append({**finding,"relation_reasons":reasons,"relation_score":(3 if identity in identities else 0)+len(overlap)*2+(1 if finding.get("surface") in surfaces else 0)})
+    candidates.sort(key=lambda x:(x["relation_score"],x.get("risk_score",0)),reverse=True); return {"data":candidates[:25]}
+
+@app.get("/api/investigations/{case_id}/export")
+def investigation_export(case_id: int, request: Request, report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
+    case=_case_or_404(case_id); report_format=report_format.lower()
+    if report_format=="pdf": payload=case_pdf(case,user,APP_VERSION); media="application/pdf"; ext="pdf"
+    elif report_format=="json": payload=json.dumps({"exported_at":datetime.now(timezone.utc).isoformat(),"exported_by":user,"version":APP_VERSION,"case":case},indent=2).encode(); media="application/json"; ext="json"
+    else: raise HTTPException(400,"Case export format must be pdf or json")
+    audit(user,"case_exported","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":report_format})
+    return Response(payload,media_type=media,headers={"Content-Disposition":f'attachment; filename="jo-ai-monitor-case-{case_id}.{ext}"',"Cache-Control":"no-store"})
 
 @app.get("/api/activities")
 async def activities(request: Request, limit: int = 100, user: str = Depends(current_user)):

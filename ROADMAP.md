@@ -67,19 +67,25 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 
 **Goal:** Turn detected findings into a complete analyst review workflow.
 
-### Planned capabilities
+### Delivered in v0.8.0
 
-- Assign findings and cases to reviewers.
+- Durable cases with priority, assignment, due dates, descriptions, and tags.
 - New, Investigating, Confirmed, Benign, Accepted Risk, and Closed states.
-- Analyst notes, comments, attachments, and timestamps.
-- Required disposition reasons and closure validation.
-- Tags, custom categories, priority, due date, and escalation state.
+- Required disposition reasons for benign, accepted-risk, and closed outcomes.
+- Analyst notes with a complete actor-and-timestamp case timeline.
+- Stable evidence snapshots linked independently of upstream provider changes.
+- Related-finding suggestions using identity, indicator, provider surface, and risk context.
+- Case-level PDF and JSON evidence packages separating evidence from analyst commentary.
+- Audited case creation, search, views, updates, notes, links, and exports.
+- Full-page analyst queue and case-detail interface, including seeded demo investigations.
+
+### Remaining v0.8 capabilities
+
+- Threaded comments and file attachments.
+- Custom categories and escalation state.
 - Bulk assignment, tagging, status changes, and export.
-- Related findings by identity, provider, indicator, category, and time window.
-- Evidence snapshots that remain stable if upstream content changes.
+- Additional time-window controls for related-finding correlation.
 - Legal hold and preservation workflow.
-- Case-level PDF and JSON evidence packages.
-- Complete case-history audit trail.
 - Saved searches and reviewer queues.
 
 ### Acceptance criteria

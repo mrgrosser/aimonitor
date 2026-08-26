@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.7.2`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.8.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -69,6 +69,12 @@ The reporting toolbar generates audited PDF, CSV, JSON, and printable HTML repor
 The **Reports** page provides custom date, severity, and surface filters; risk/category/provenance summaries; month-over-month finding and usage trends; and PDF, CSV, and JSON findings exports. Every view and export records its actor, filters, report version, and result count in the audit chain.
 
 Named identities are excluded by default. Set `NAMED_USER_REPORT_ROLES` to the approved Entra application roles allowed to include them; local admin retains access for evaluation and emergency use. Scheduled daily, weekly, or monthly report definitions are stored in the persistent database. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional SMTP credentials to enable delivery. Without SMTP, schedules remain visible and report the delivery configuration state rather than silently failing.
+
+## Investigation cases
+
+Version 0.8 introduces a persistent analyst workflow on the **Cases** page. Findings can be snapshotted into a case and managed through New, Investigating, Confirmed, Benign, Accepted Risk, and Closed states. Cases include priority, assignee, due date, tags, analyst notes, related-finding suggestions, and PDF/JSON evidence packages. Benign, accepted-risk, and closed outcomes require a disposition reason.
+
+Original provider evidence is preserved separately from analyst commentary. Each creation, evidence link, assignment, workflow change, note, and export records its actor and timestamp in both the case timeline and the application audit ledger. Demo mode seeds three investigation cases so the workflow is immediately usable during leadership reviews.
 
 ## Production notes
 
