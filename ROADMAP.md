@@ -33,25 +33,27 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Usage & Spend dashboard covering adoption, applications, products, models, licensing, budgets, and anonymized utilization.
 - Visible runtime version and cache prevention for deployment verification.
 
-## v0.7: Reports and analytics ingestion
+## v0.7: Reports and analytics ingestion — in progress
 
 **Goal:** Make JO AI Monitor useful for recurring leadership, Security, Legal, Finance, and Compliance reviews.
 
-### Planned capabilities
+### Delivered in v0.7.0
 
-- Executive PDF report for a selected reporting period.
+- Executive PDF, CSV, JSON, and printable HTML reports.
+- Reporting-period selector and historical period archive.
+- XLSX and normalized CSV import with preview and validation.
+- Source fingerprint, duplicate protection, replacement confirmation, and reconciliation warnings.
+- Stable anonymization of imported user identities.
+- Audit events for report generation, import preview, and confirmed import.
+
+### Remaining v0.7 capabilities
+
 - Compliance finding report with severity, category, disposition, evidence identifiers, and provenance.
-- CSV exports for usage, cost, applications, products, models, licenses, and authorized user detail.
-- Printable dashboard view.
-- Reporting-period selector and custom date range.
+- Custom date ranges within reporting periods.
 - Month-over-month adoption, spend, risk, and finding trends.
 - Scheduled monthly report generation and delivery.
-- XLSX and CSV import for normalized monthly usage analytics.
-- Import validation, preview, duplicate detection, source fingerprint, and error report.
-- Historical reporting-period archive.
 - Live usage connectors where provider APIs expose equivalent analytics.
-- Audit events for report generation, download, scheduling, import, and delivery.
-- Role-aware report redaction and aggregate-only leadership defaults.
+- Role-aware named-user report access after RBAC approval.
 
 ### Acceptance criteria
 

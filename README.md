@@ -22,7 +22,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.6.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.7.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -50,7 +50,17 @@ The **Usage & spend** navigation item keeps adoption and economics separate from
 
 Copilot interactions and Claude requests are intentionally displayed as different units. They are not added together or treated as measures of employee productivity. Opening the dashboard writes a `usage_analytics_viewed` event to the access-audit chain.
 
-Live deployments currently show the module as unconfigured until a monthly analytics ingestion connector is supplied. No real identities from the source workbook are embedded in the application.
+Version 0.7 adds reporting-period history, validated XLSX/CSV ingestion, source SHA-256 fingerprints, duplicate protection, reconciliation warnings, and executive reports. Use **Import** in the Usage & Spend toolbar to preview a file before committing it to the persistent database. Imported user identities are converted to stable keyed aliases using `USAGE_ANONYMIZATION_KEY` (or `SESSION_SECRET` as a fallback); keep that key stable across deployments if aliases must remain consistent between periods.
+
+The XLSX importer recognizes the JO AI Monitor leadership workbook structure: `AI Usage Summary`, `Claude Product & Model`, `Copilot App Totals`, `Copilot User by App`, and `Claude Detail`. Normalized CSV imports use these columns:
+
+```text
+category,name,period,value,text,requests,interactions,spend,users,provider,volume,surfaces,active_days
+```
+
+Supported categories are `summary`, `licensing`, `claude_product`, `claude_model`, `copilot_app`, `top_user`, and `caveat`. Summary and licensing rows put the metric key in `name` and its value in `value`.
+
+The reporting toolbar generates audited PDF, CSV, JSON, and printable HTML reports for the selected period. Live deployments without an imported period or analytics connector display an explicit unconfigured state. No real identities from the original source workbook are embedded in the application.
 
 ## Production notes
 

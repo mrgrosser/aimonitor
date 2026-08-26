@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,11 +14,12 @@ from urllib.parse import urlencode
 
 import httpx
 from authlib.integrations.starlette_client import OAuth, OAuthError
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record_suppressed, score_evidence, suppressed_count, verify_chain
+from app.usage_reporting import get_usage_period, init_usage_db, list_usage_periods, parse_usage_file, save_usage_period, usage_csv, usage_html, usage_pdf
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -26,7 +28,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.6.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.7.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -49,6 +51,7 @@ app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 init_db()
+init_usage_db()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -239,7 +242,7 @@ async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) 
     return res.json()
 
 @app.get("/health")
-def health(): return {"status":"ok","version":APP_VERSION,"mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED}
+def health(): return {"status":"ok","version":APP_VERSION,"mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED,"usage_reporting_enabled":True}
 
 @app.get("/")
 def index(): return FileResponse(ROOT / "static" / "index.html")
@@ -381,15 +384,70 @@ def providers(request: Request, user: str = Depends(current_user)):
         {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
     ]}
 
-@app.get("/api/usage")
-def usage_analytics(request: Request, user: str = Depends(current_user)):
-    audit(user,"usage_analytics_viewed","usage_analytics",source_ip=request.client.host if request.client else "",
-        user_agent=request.headers.get("user-agent",""),details={"period":DEMO_USAGE["period"],"mode":"demo" if DEMO else "live"})
-    if DEMO:
-        return {**DEMO_USAGE,"mode":"demo"}
+def resolve_usage(period: str = "") -> dict[str, Any]:
+    if period:
+        stored=get_usage_period(period)
+        if stored: return {**stored,"mode":"imported"}
+        if DEMO and period == DEMO_USAGE["period"]: return {**DEMO_USAGE,"mode":"demo"}
+        raise HTTPException(404,"Usage reporting period not found")
+    periods=list_usage_periods()
+    if periods:
+        stored=get_usage_period(periods[0]["period"])
+        if stored: return {**stored,"mode":"imported"}
+    if DEMO: return {**DEMO_USAGE,"mode":"demo"}
     return {"mode":"live","period":None,"source":"Usage analytics connector not configured","summary":{},
         "licensing":{},"claude_products":[],"claude_models":[],"copilot_apps":[],"top_users":[],
-        "caveats":["Configure monthly usage analytics ingestion to populate this view."]}
+        "caveats":["Import monthly XLSX/CSV analytics or configure a live connector to populate this view."]}
+
+@app.get("/api/usage")
+def usage_analytics(request: Request, period: str = "", user: str = Depends(current_user)):
+    data=resolve_usage(period)
+    audit(user,"usage_analytics_viewed","usage_analytics",str(data.get("period") or ""),request.client.host if request.client else "",
+        request.headers.get("user-agent",""),{"mode":data.get("mode")})
+    return data
+
+@app.get("/api/usage/periods")
+def usage_periods(request: Request, user: str = Depends(current_user)):
+    periods=list_usage_periods()
+    if DEMO and not any(x["period"] == DEMO_USAGE["period"] for x in periods):
+        s=DEMO_USAGE["summary"]; periods.append({"period":DEMO_USAGE["period"],"source_name":"Built-in anonymized demo",
+            "source_hash":"demo","imported_at":None,"imported_by":"system","copilot_interactions":s["copilot_interactions"],
+            "claude_requests":s["claude_requests"],"claude_usage_spend":s["claude_usage_spend"]})
+    audit(user,"usage_periods_viewed","usage_analytics",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"periods":len(periods)})
+    return {"data":periods}
+
+@app.post("/api/usage/import/preview")
+async def usage_import_preview(request: Request, file: UploadFile = File(...), user: str = Depends(current_user)):
+    content=await file.read()
+    try: data,digest=parse_usage_file(content,file.filename or "usage.xlsx")
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"usage_import_previewed","usage_import",str(data.get("period") or ""),request.client.host if request.client else "",
+        request.headers.get("user-agent",""),{"filename":file.filename,"sha256":digest,"warnings":len(data.get("validation",{}).get("warnings",[]))})
+    return {"data":data,"source_hash":digest,"filename":file.filename}
+
+@app.post("/api/usage/import")
+async def usage_import(request: Request, file: UploadFile = File(...), replace: bool = False, user: str = Depends(current_user)):
+    content=await file.read()
+    try:
+        data,digest=parse_usage_file(content,file.filename or "usage.xlsx")
+        save_usage_period(data,file.filename or "usage.xlsx",digest,user,replace)
+    except ValueError as exc: raise HTTPException(409 if "already" in str(exc) else 400,str(exc))
+    audit(user,"usage_period_imported","usage_period",str(data["period"]),request.client.host if request.client else "",
+        request.headers.get("user-agent",""),{"filename":file.filename,"sha256":digest,"replace":replace})
+    return {"ok":True,"period":data["period"],"validation":data.get("validation",{})}
+
+@app.get("/api/reports/usage")
+def usage_report(request: Request, period: str = "", report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
+    data=resolve_usage(period); report_format=report_format.lower(); safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
+    if report_format == "pdf": payload=usage_pdf(data,user,APP_VERSION); media="application/pdf"; ext="pdf"
+    elif report_format == "csv": payload=usage_csv(data); media="text/csv; charset=utf-8"; ext="csv"
+    elif report_format == "json": payload=json.dumps({"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"report":data},indent=2).encode(); media="application/json"; ext="json"
+    elif report_format == "html":
+        audit(user,"usage_report_generated","usage_report",str(data.get("period") or ""),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":"html"})
+        return HTMLResponse(usage_html(data,user,APP_VERSION),headers={"Cache-Control":"no-store"})
+    else: raise HTTPException(400,"Report format must be pdf, csv, json, or html")
+    audit(user,"usage_report_generated","usage_report",str(data.get("period") or ""),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":report_format})
+    return Response(payload,media_type=media,headers={"Content-Disposition":f'attachment; filename="jo-ai-monitor-{safe}.{ext}"',"Cache-Control":"no-store"})
 
 @app.get("/api/audit")
 def audit_log(request: Request, limit: int = 200, actor: str = "", action: str = "", user: str = Depends(current_user)):
