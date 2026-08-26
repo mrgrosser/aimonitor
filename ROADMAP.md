@@ -15,7 +15,7 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Use read-only provider permissions unless a separately approved control requires write access.
 - Support multiple AI providers through a normalized evidence and usage model.
 
-## Delivered: v0.1–v0.6
+## Delivered: v0.1–v0.7
 
 - Docker and Docker Compose deployment, including Komodo/Gitea-compatible local image builds.
 - Standard authentication with signed HTTP-only sessions.
@@ -33,7 +33,7 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Usage & Spend dashboard covering adoption, applications, products, models, licensing, budgets, and anonymized utilization.
 - Visible runtime version and cache prevention for deployment verification.
 
-## v0.7: Reports and analytics ingestion — in progress
+## v0.7: Reports and analytics ingestion — delivered
 
 **Goal:** Make JO AI Monitor useful for recurring leadership, Security, Legal, Finance, and Compliance reviews.
 
@@ -46,14 +46,14 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Stable anonymization of imported user identities.
 - Audit events for report generation, import preview, and confirmed import.
 
-### Remaining v0.7 capabilities
+### Delivered in v0.7.2
 
-- Compliance finding report with severity, category, disposition, evidence identifiers, and provenance.
-- Custom date ranges within reporting periods.
+- Compliance finding reports with severity, category, disposition, evidence identifiers, rule versions, and provenance.
+- Custom date, severity, and provider-surface filters.
 - Month-over-month adoption, spend, risk, and finding trends.
-- Scheduled monthly report generation and delivery.
-- Live usage connectors where provider APIs expose equivalent analytics.
-- Role-aware named-user report access after RBAC approval.
+- Persistent daily, weekly, and monthly report schedules with optional SMTP delivery and audited outcomes.
+- Connector-status reporting for live Compliance, Microsoft Graph, imported analytics, and SMTP capabilities.
+- Role-aware named-user reporting, hidden by default and approval-gated through Entra application roles.
 
 ### Acceptance criteria
 

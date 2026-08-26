@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record_suppressed, score_evidence, suppressed_count, verify_chain
 from app.usage_reporting import get_usage_period, init_usage_db, list_usage_periods, parse_usage_file, save_usage_period, usage_csv, usage_html, usage_pdf
+from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -28,7 +29,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.7.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.7.2")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -52,6 +53,7 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"),
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 init_db()
 init_usage_db()
+init_reporting_db()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -104,7 +106,8 @@ def build_demo_cases(count: int = 100) -> list[dict[str, Any]]:
     for i in range(count):
         scenario = _DEMO_SCENARIOS[i % len(_DEMO_SCENARIOS)]
         user_id, email = _DEMO_USERS[(i * 5 + i // len(_DEMO_SCENARIOS)) % len(_DEMO_USERS)]
-        created = anchor - timedelta(minutes=i * 37 + (i % 7) * 11)
+        # Spread leadership-demo findings across four months so date filters and trends are meaningful.
+        created = anchor - timedelta(hours=i * 28 + (i % 7) * 3)
         updated = created + timedelta(minutes=2 + i % 19)
         prefix = "m365_demo" if scenario["kind"] == "copilot" else "claude_chat" if scenario["kind"] == "chat" else "cse_demo"
         case_id = f"{prefix}_{i + 1:03d}"
@@ -214,12 +217,15 @@ async def m365_cases() -> list[dict[str,Any]]:
             _m365_evidence[cid]=case; cases.append(case)
     return cases
 
-def make_token(username: str) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps({"u": username, "exp": int(time.time()) + 28800}).encode()).decode().rstrip("=")
+def make_token(username: str, roles: set[str] | None = None, method: str = "local") -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"u":username,"roles":sorted(roles or []),"method":method,"exp":int(time.time())+28800}).encode()).decode().rstrip("=")
     sig = hmac.new(SECRET, payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 def current_user(request: Request) -> str:
+    return current_identity(request)["user"]
+
+def current_identity(request: Request) -> dict[str, Any]:
     token = request.cookies.get("cm_session", "")
     try:
         payload, sig = token.rsplit(".", 1)
@@ -228,7 +234,7 @@ def current_user(request: Request) -> str:
         raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
         data = json.loads(raw)
         if data["exp"] < time.time(): raise ValueError()
-        return data["u"]
+        return {"user":data["u"],"roles":set(data.get("roles",[])),"method":data.get("method","local")}
     except Exception:
         raise HTTPException(401, "Authentication required")
 
@@ -255,7 +261,7 @@ async def login(request: Request):
         audit(str(body.get("username") or "unknown"),"login_failed","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
         raise HTTPException(401, "Invalid username or password")
     response = JSONResponse({"user": USERNAME})
-    response.set_cookie("cm_session", make_token(USERNAME), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
+    response.set_cookie("cm_session", make_token(USERNAME,{"Compliance.Admin"},"local"), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
     audit(USERNAME,"login_succeeded","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"method":"local"})
     return response
 
@@ -290,26 +296,34 @@ async def entra_callback(request: Request):
         return RedirectResponse("/?auth_error=access_not_assigned")
     username = claims.get("preferred_username") or claims.get("email") or claims.get("sub")
     response = RedirectResponse("/", status_code=302)
-    response.set_cookie("cm_session", make_token(username), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
+    response.set_cookie("cm_session", make_token(username,roles,"entra"), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
     audit(username,"login_succeeded","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"method":"entra","roles":sorted(roles)})
     return response
 
 @app.get("/api/auth/me")
-def me(user: str = Depends(current_user)): return {"user":user,"mode":"demo" if DEMO else "live"}
+def me(request: Request, user: str = Depends(current_user)):
+    identity=current_identity(request)
+    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES)}
 
-@app.get("/api/cases")
-async def cases(request: Request, q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
-    if DEMO:
-        rows = DEMO_CASES
+def can_view_named_users(request: Request) -> bool:
+    identity=current_identity(request)
+    return identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES)
+
+async def collect_findings() -> list[dict[str, Any]]:
+    if DEMO: rows=[dict(x) for x in DEMO_CASES]
     else:
-        chats, local, remote = await _live_index()
-        rows = await hydrate_live(chats + local + remote) + (await m365_cases() if M365_ENABLED else [])
+        chats,local,remote=await _live_index()
+        rows=await hydrate_live(chats+local+remote)+(await m365_cases() if M365_ENABLED else [])
     promoted=[]
     for row in rows:
         score_evidence(row)
         if row["promoted"]: promoted.append(row)
         else: record_suppressed(row,"m365" if row.get("kind")=="copilot" else "anthropic")
-    rows=promoted
+    return promoted
+
+@app.get("/api/cases")
+async def cases(request: Request, q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
+    rows=await collect_findings()
     needle = q.lower().strip()
     result=[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())]
     audit(user,"findings_searched","evidence_collection",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"query":q,"risk":risk,"surface":surface,"results":len(result)})
@@ -440,7 +454,7 @@ async def usage_import(request: Request, file: UploadFile = File(...), replace: 
 def usage_report(request: Request, period: str = "", report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
     data=resolve_usage(period); report_format=report_format.lower(); safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
     if report_format == "pdf": payload=usage_pdf(data,user,APP_VERSION); media="application/pdf"; ext="pdf"
-    elif report_format == "csv": payload=usage_csv(data); media="text/csv; charset=utf-8"; ext="csv"
+    elif report_format == "csv": payload=usage_csv(data,user,APP_VERSION); media="text/csv; charset=utf-8"; ext="csv"
     elif report_format == "json": payload=json.dumps({"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"report":data},indent=2).encode(); media="application/json"; ext="json"
     elif report_format == "html":
         audit(user,"usage_report_generated","usage_report",str(data.get("period") or ""),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":"html"})
@@ -448,6 +462,98 @@ def usage_report(request: Request, period: str = "", report_format: str = Query(
     else: raise HTTPException(400,"Report format must be pdf, csv, json, or html")
     audit(user,"usage_report_generated","usage_report",str(data.get("period") or ""),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":report_format})
     return Response(payload,media_type=media,headers={"Content-Disposition":f'attachment; filename="jo-ai-monitor-{safe}.{ext}"',"Cache-Control":"no-store"})
+
+@app.get("/api/reports/findings/summary")
+async def findings_report_summary(request: Request, date_from: str = "", date_to: str = "", risk: str = "all", surface: str = "all", include_named_users: bool = False, user: str = Depends(current_user)):
+    if include_named_users and not can_view_named_users(request): raise HTTPException(403,"Named-user reporting requires an approved report role")
+    try: rows=filter_findings(await collect_findings(),date_from,date_to,risk,surface)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    report=findings_summary(rows,include_named_users)
+    audit(user,"findings_report_viewed","findings_report",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"date_from":date_from,"date_to":date_to,"risk":risk,"surface":surface,"include_named_users":include_named_users,"results":len(rows)})
+    return {"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"filters":{"date_from":date_from,"date_to":date_to,"risk":risk,"surface":surface},"named_users_included":include_named_users,"named_user_authorized":can_view_named_users(request),"report":report}
+
+@app.get("/api/reports/findings")
+async def findings_report(request: Request, date_from: str = "", date_to: str = "", risk: str = "all", surface: str = "all", include_named_users: bool = False, report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
+    if include_named_users and not can_view_named_users(request): raise HTTPException(403,"Named-user reporting requires an approved report role")
+    try: rows=filter_findings(await collect_findings(),date_from,date_to,risk,surface)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    filters={"date_from":date_from,"date_to":date_to,"risk":risk,"surface":surface}; report=findings_summary(rows,include_named_users); report_format=report_format.lower()
+    envelope={"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"filters":filters,"named_users_included":include_named_users,"report":report}
+    if report_format=="pdf": payload=findings_pdf(report,user,APP_VERSION,filters); media="application/pdf"; ext="pdf"
+    elif report_format=="csv": payload=findings_csv(report,user,APP_VERSION,filters); media="text/csv; charset=utf-8"; ext="csv"
+    elif report_format=="json": payload=json.dumps(envelope,indent=2).encode(); media="application/json"; ext="json"
+    else: raise HTTPException(400,"Report format must be pdf, csv, or json")
+    audit(user,"findings_report_generated","findings_report",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={**filters,"format":report_format,"include_named_users":include_named_users,"results":len(rows)})
+    return Response(payload,media_type=media,headers={"Content-Disposition":f'attachment; filename="jo-ai-monitor-findings.{ext}"',"Cache-Control":"no-store"})
+
+@app.get("/api/reports/trends")
+async def report_trends(request: Request, user: str = Depends(current_user)):
+    risk=findings_trends(await collect_findings()); usage=[]
+    for item in reversed(list_usage_periods()):
+        usage.append({"period":item["period"],"copilot_interactions":item.get("copilot_interactions",0),"claude_requests":item.get("claude_requests",0),"claude_usage_spend":item.get("claude_usage_spend",0)})
+    if DEMO and not usage:
+        base=DEMO_USAGE["summary"]
+        for month,multiplier in (("April 2026",.63),("May 2026",.74),("June 2026",.86),("July 2026",1)):
+            usage.append({"period":month,"copilot_interactions":round(base["copilot_interactions"]*multiplier),"claude_requests":round(base["claude_requests"]*multiplier),"claude_usage_spend":round(base["claude_usage_spend"]*multiplier,2)})
+    audit(user,"trends_viewed","reports",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
+    return {"risk":risk,"usage":usage}
+
+@app.get("/api/report-schedules")
+def report_schedules(request: Request, user: str = Depends(current_user)):
+    audit(user,"report_schedules_viewed","report_schedule",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
+    return {"data":list_schedules(),"smtp_configured":smtp_configured(),"named_user_authorized":can_view_named_users(request)}
+
+@app.post("/api/report-schedules")
+async def add_report_schedule(request: Request, user: str = Depends(current_user)):
+    body=await request.json(); include=bool(body.get("include_named_users"))
+    if include and not can_view_named_users(request): raise HTTPException(403,"Named-user reporting requires an approved report role")
+    try: schedule=create_schedule(str(body.get("name") or "Compliance report"),body.get("recipients") or [],str(body.get("frequency") or "monthly"),str(body.get("format") or "pdf").lower(),include,user)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"report_schedule_created","report_schedule",str(schedule["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"frequency":schedule["frequency"],"format":schedule["report_format"],"include_named_users":include})
+    return schedule
+
+@app.delete("/api/report-schedules/{schedule_id}")
+def remove_report_schedule(schedule_id: int, request: Request, user: str = Depends(current_user)):
+    delete_schedule(schedule_id); audit(user,"report_schedule_deleted","report_schedule",str(schedule_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return {"ok":True}
+
+@app.get("/api/connectors/status")
+def connector_status(user: str = Depends(current_user)):
+    return {"data":[
+        {"id":"anthropic_compliance","name":"Claude Compliance evidence","configured":not DEMO,"mode":"live" if not DEMO else "demo"},
+        {"id":"m365_interactions","name":"Microsoft 365 Copilot interactions","configured":M365_ENABLED,"mode":"live" if M365_ENABLED else "not_configured"},
+        {"id":"usage_import","name":"Monthly XLSX/CSV analytics","configured":bool(list_usage_periods()) or DEMO,"mode":"imported" if list_usage_periods() else "demo" if DEMO else "not_configured"},
+        {"id":"smtp","name":"Scheduled report email delivery","configured":smtp_configured(),"mode":"live" if smtp_configured() else "artifact_only"}]}
+
+async def run_due_report_schedules() -> None:
+    now=datetime.now(timezone.utc)
+    for schedule in list_schedules():
+        if not schedule["enabled"]: continue
+        due=datetime.fromisoformat(schedule["next_run_at"].replace("Z","+00:00"))
+        if due > now: continue
+        if not smtp_configured():
+            update_schedule_run(schedule["id"],"delivery_not_configured")
+            audit("system","scheduled_report_skipped","report_schedule",str(schedule["id"]),details={"reason":"smtp_not_configured"})
+            continue
+        days={"daily":1,"weekly":7,"monthly":30}[schedule["frequency"]]; rows=filter_findings(await collect_findings(),(now-timedelta(days=days)).date().isoformat(),now.date().isoformat())
+        report=findings_summary(rows,schedule["include_named_users"]); report_format=schedule["report_format"]
+        if report_format=="pdf": payload=findings_pdf(report,"system",APP_VERSION,{"date_from":(now-timedelta(days=days)).date().isoformat(),"date_to":now.date().isoformat(),"risk":"all","surface":"all"}); media="application/pdf"
+        elif report_format=="csv": payload=findings_csv(report,"system",APP_VERSION,{"date_from":(now-timedelta(days=days)).date().isoformat(),"date_to":now.date().isoformat(),"risk":"all","surface":"all"}); media="text/csv"
+        else: payload=json.dumps({"generated_at":now.isoformat(),"version":APP_VERSION,"report":report},indent=2).encode(); media="application/json"
+        try:
+            await asyncio.to_thread(send_report,schedule["recipients"],f"JO AI Monitor - {schedule['name']}",payload,f"jo-ai-monitor-findings.{report_format}",media)
+            status=f"delivered_to_{len(schedule['recipients'])}_recipient(s)"
+        except Exception as exc: status=f"failed: {str(exc)[:180]}"
+        update_schedule_run(schedule["id"],status); audit("system","scheduled_report_processed","report_schedule",str(schedule["id"]),details={"status":status,"findings":len(rows)})
+
+async def report_scheduler_loop() -> None:
+    while True:
+        try: await run_due_report_schedules()
+        except Exception as exc: audit("system","report_scheduler_error","report_schedule",details={"error":str(exc)[:300]})
+        await asyncio.sleep(300)
+
+@app.on_event("startup")
+async def start_report_scheduler():
+    asyncio.create_task(report_scheduler_loop())
 
 @app.get("/api/audit")
 def audit_log(request: Request, limit: int = 200, actor: str = "", action: str = "", user: str = Depends(current_user)):

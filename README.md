@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.7.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.7.2`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -63,6 +63,12 @@ category,name,period,value,text,requests,interactions,spend,users,provider,volum
 Supported categories are `summary`, `licensing`, `claude_product`, `claude_model`, `copilot_app`, `top_user`, and `caveat`. Summary and licensing rows put the metric key in `name` and its value in `value`.
 
 The reporting toolbar generates audited PDF, CSV, JSON, and printable HTML reports for the selected period. Live deployments without an imported period or analytics connector display an explicit unconfigured state. No real identities from the original source workbook are embedded in the application.
+
+## Compliance reports and scheduling
+
+The **Reports** page provides custom date, severity, and surface filters; risk/category/provenance summaries; month-over-month finding and usage trends; and PDF, CSV, and JSON findings exports. Every view and export records its actor, filters, report version, and result count in the audit chain.
+
+Named identities are excluded by default. Set `NAMED_USER_REPORT_ROLES` to the approved Entra application roles allowed to include them; local admin retains access for evaluation and emergency use. Scheduled daily, weekly, or monthly report definitions are stored in the persistent database. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional SMTP credentials to enable delivery. Without SMTP, schedules remain visible and report the delivery configuration state rather than silently failing.
 
 ## Production notes
 
