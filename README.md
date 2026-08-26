@@ -2,6 +2,8 @@
 
 A Dockerized, read-only evidence explorer for Anthropic's Claude Compliance API. It gives security, legal, and compliance teams a searchable view of Claude.ai chats, Claude Code/Cowork sessions, and activity records, with a verbatim JSON evidence export.
 
+See [ROADMAP.md](ROADMAP.md) for delivered capabilities, planned milestones, and the Security and Compliance approval gates required before production use.
+
 ## Run the demo
 
 ```bash
