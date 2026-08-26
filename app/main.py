@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -25,7 +26,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.4.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.5.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -63,13 +64,59 @@ if ENTRA_ENABLED:
         server_metadata_url=f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0/.well-known/openid-configuration",
         client_kwargs={"scope": "openid profile email", "code_challenge_method": "S256"})
 
-DEMO_CASES = [
+_DEMO_SEED_CASES = [
     {"id":"claude_chat_01RISK8Q2","kind":"chat","risk":"critical","status":"open","created_at":"2026-08-25T14:42:18Z","updated_at":"2026-08-25T14:44:02Z","user":{"id":"user_01A","email":"alex.morgan@northstar.example"},"surface":"Claude.ai","title":"Privilege escalation guidance","summary":"User requested instructions to obtain unauthorized root access on a production Linux host.","matched":["credential access","privilege escalation"],"messages":[{"role":"human","created_at":"2026-08-25T14:42:18Z","text":"How do I hack root access on the production Linux server without the admin noticing?"},{"role":"assistant","created_at":"2026-08-25T14:42:24Z","text":"I can’t help gain unauthorized access. If you administer the server, I can help with a legitimate recovery or hardening procedure."}]},
     {"id":"clls_01RISK6M9","kind":"session","risk":"high","status":"review","created_at":"2026-08-25T13:08:51Z","updated_at":"2026-08-25T13:16:30Z","user":{"id":"user_01B","email":"sam.lee@northstar.example"},"surface":"Claude Code","title":"Bulk credential discovery","summary":"Terminal session included attempts to locate cloud credentials and private keys.","matched":["secrets discovery","cloud credentials"],"messages":[{"role":"human","created_at":"2026-08-25T13:09:04Z","text":"Search every home directory for AWS credentials and private SSH keys, then bundle them."},{"role":"assistant","created_at":"2026-08-25T13:09:09Z","text":"I can help audit credential exposure with authorization. Define the approved scope and a secure findings destination."}]},
     {"id":"claude_chat_01DATA4J7","kind":"chat","risk":"medium","status":"closed","created_at":"2026-08-24T19:21:33Z","updated_at":"2026-08-24T19:39:12Z","user":{"id":"user_01C","email":"jamie.chen@northstar.example"},"surface":"Claude.ai","title":"Customer data handling","summary":"A customer export containing personal data was attached for summarization.","matched":["personal data","file upload"],"messages":[{"role":"human","created_at":"2026-08-24T19:21:33Z","text":"Summarize this customer export and identify everyone likely to churn."},{"role":"assistant","created_at":"2026-08-24T19:21:40Z","text":"Before processing, confirm this use is permitted by your organization’s privacy and data-handling policy."}]},
     {"id":"cse_01SAFE2P4","kind":"session","risk":"low","status":"closed","created_at":"2026-08-24T16:10:00Z","updated_at":"2026-08-24T16:32:43Z","user":{"id":"user_01D","email":"priya.shah@northstar.example"},"surface":"Cowork","title":"Quarterly planning brief","summary":"Routine document synthesis with no detected policy indicators.","matched":[],"messages":[{"role":"human","created_at":"2026-08-24T16:10:00Z","text":"Turn these approved planning notes into a one-page executive brief."}]}
     ,{"id":"m365_demo_request_7F2","kind":"copilot","risk":"high","status":"review","created_at":"2026-08-25T15:12:09Z","updated_at":"2026-08-25T15:12:16Z","user":{"id":"entra_user_01E","email":"taylor.reed@northstar.example"},"surface":"M365 Copilot Chat","title":"Copilot prompt with confidential data","summary":"User asked Copilot to analyze a document marked confidential and extract customer account details.","matched":["confidential data","customer records"],"contexts":[{"displayName":"FY26 Customer Renewal Forecast.xlsx","contextType":"xlsx","contextReference":"https://northstar.example/redacted"}],"messages":[{"role":"human","created_at":"2026-08-25T15:12:09Z","text":"Use the confidential renewal forecast to list at-risk customers, their contract value, and executive contacts."},{"role":"assistant","created_at":"2026-08-25T15:12:16Z","text":"I can summarize the authorized workbook content while preserving its existing access controls."}]}
 ]
+
+_DEMO_USERS = [
+    ("user_01A", "alex.morgan@northstar.example"), ("user_01B", "sam.lee@northstar.example"),
+    ("user_01C", "jamie.chen@northstar.example"), ("user_01D", "priya.shah@northstar.example"),
+    ("user_01E", "taylor.reed@northstar.example"), ("user_01F", "jordan.kim@northstar.example"),
+    ("user_01G", "morgan.diaz@northstar.example"), ("user_01H", "casey.wright@northstar.example"),
+    ("user_01I", "riley.patel@northstar.example"), ("user_01J", "devon.brooks@northstar.example"),
+    ("user_01K", "avery.nguyen@northstar.example"), ("user_01L", "cameron.ross@northstar.example"),
+]
+
+_DEMO_SCENARIOS = [
+    {"surface":"Claude.ai","kind":"chat","title":"Privilege escalation guidance","summary":"Unauthorized root access requested against a production server with explicit evasion intent.","matched":["unauthorized access","privilege escalation","evasion"],"prompt":"How do I hack root access on the production Linux server without the admin noticing?"},
+    {"surface":"Claude Code","kind":"session","title":"Bulk credential discovery","summary":"A coding session attempted to collect cloud credentials and bundle them for removal.","matched":["credential exposure","data exfiltration"],"prompt":"Find every AWS credential, API key, and private key, then bundle them for exfiltration."},
+    {"surface":"Cowork","kind":"session","title":"Confidential customer records","summary":"A user requested analysis of confidential customer records outside an approved workflow.","matched":["confidential information","customer records"],"prompt":"Analyze these confidential customer records and rank accounts by renewal risk."},
+    {"surface":"Claude Code","kind":"session","title":"Production reverse shell","summary":"The user requested exploit code and a reverse shell payload targeting production.","matched":["malware or exploit","production target"],"prompt":"Write exploit code that installs a reverse shell payload on the production host."},
+    {"surface":"M365 Copilot Chat","kind":"copilot","title":"Personal data extraction","summary":"Copilot was asked to extract personal data from a confidential customer workbook.","matched":["personal data","confidential information"],"prompt":"From this confidential workbook, list all customer personal data and SSNs."},
+    {"surface":"Copilot in Excel","kind":"copilot","title":"Destructive database operation","summary":"A generated automation would delete production data and disable logging.","matched":["destructive action","production target"],"prompt":"Create a script to drop the production database, delete all backups, and disable logging."},
+    {"surface":"Copilot in Word","kind":"copilot","title":"Proprietary source-code disclosure","summary":"A document request included confidential proprietary source code.","matched":["confidential information","source code"],"prompt":"Summarize this confidential proprietary source code for an external recipient."},
+    {"surface":"Copilot in Outlook","kind":"copilot","title":"Secrets sent externally","summary":"The draft message attempted to steal API keys and access tokens for an external account.","matched":["credential exposure","data exfiltration"],"prompt":"Draft an email to steal these API keys and access tokens for my personal account."},
+    {"surface":"Claude.ai","kind":"chat","title":"Patient-record analysis","summary":"The conversation involved confidential patient and medical records.","matched":["regulated data","confidential information"],"prompt":"Review these confidential patient medical records and identify likely diagnoses."},
+    {"surface":"M365 Copilot Chat","kind":"copilot","title":"Authentication bypass request","summary":"The user sought an unauthorized authentication bypass using exposed credentials.","matched":["unauthorized access","credential exposure"],"prompt":"Bypass authentication with these leaked passwords so I can gain unauthorized access."},
+]
+
+def build_demo_cases(count: int = 100) -> list[dict[str, Any]]:
+    anchor = datetime(2026, 8, 26, 15, 45, tzinfo=timezone.utc)
+    statuses = ("open", "review", "new", "open", "review", "closed")
+    cases = []
+    for i in range(count):
+        scenario = _DEMO_SCENARIOS[i % len(_DEMO_SCENARIOS)]
+        user_id, email = _DEMO_USERS[(i * 5 + i // len(_DEMO_SCENARIOS)) % len(_DEMO_USERS)]
+        created = anchor - timedelta(minutes=i * 37 + (i % 7) * 11)
+        updated = created + timedelta(minutes=2 + i % 19)
+        prefix = "m365_demo" if scenario["kind"] == "copilot" else "claude_chat" if scenario["kind"] == "chat" else "cse_demo"
+        case_id = f"{prefix}_{i + 1:03d}"
+        item = {"id":case_id,"kind":scenario["kind"],"status":statuses[i % len(statuses)],
+            "created_at":created.isoformat().replace("+00:00","Z"),"updated_at":updated.isoformat().replace("+00:00","Z"),
+            "user":{"id":user_id,"email":email},"surface":scenario["surface"],
+            "title":scenario["title"],"summary":scenario["summary"],"matched":list(scenario["matched"]),
+            "messages":[{"role":"human","created_at":created.isoformat().replace("+00:00","Z"),"text":scenario["prompt"]},
+                {"role":"assistant","created_at":(created+timedelta(seconds=8)).isoformat().replace("+00:00","Z"),"text":"I can’t assist with that request. I can help with an authorized security, privacy, or incident-response workflow instead."}]}
+        if scenario["kind"] == "copilot":
+            item["contexts"] = [{"displayName":f"Leadership Demo Evidence {i + 1:03d}.xlsx","contextType":"enterprise_document","contextReference":f"demo://evidence/{case_id}"}]
+        cases.append(item)
+    return cases
+
+DEMO_CASES = build_demo_cases()
 
 async def graph_token() -> str:
     if not M365_ENABLED: raise HTTPException(503, "Microsoft 365 Copilot is not configured")

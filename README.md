@@ -20,7 +20,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.4.1`. The same version appears persistently in the lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.5.0`. The same version appears persistently in the lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -38,7 +38,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Search and filtering, transcript drill-down, Activity Feed and organizations backend endpoints
 - Downloadable JSON evidence envelope with source, exporter, and timestamp
 - Responsive UI, health check, Docker Compose, persistent volume
-- Safe demo mode when no Anthropic key is present
+- Safe demo mode with 100 realistic, threshold-qualified leadership-demo findings when no Anthropic key is present
 - Microsoft 365 Copilot Chat and Copilot-in-Office prompt/response ingestion through Microsoft Graph
 
 ## Production notes
