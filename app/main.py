@@ -26,7 +26,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.5.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.6.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -117,6 +117,44 @@ def build_demo_cases(count: int = 100) -> list[dict[str, Any]]:
     return cases
 
 DEMO_CASES = build_demo_cases()
+
+DEMO_USAGE = {
+    "period":"July 2026","source":"Anonymized leadership demo based on monthly analytics exports",
+    "summary":{"copilot_active_users":88,"claude_active_users":12,"copilot_interactions":7793,
+        "claude_requests":9302,"claude_usage_spend":302.02,"claude_usage_budget":800.00,
+        "agent_interactions":501,"distinct_surfaces":16},
+    "licensing":{"claude_seats_purchased":20,"claude_seats_assigned":11,"claude_seats_unassigned":9,
+        "claude_annual_seat_cost":4800.00,"monthly_seat_equivalent":400.00,"estimated_monthly_run_rate":702.02,
+        "copilot_usage_cost":"Included in license fee"},
+    "claude_products":[
+        {"name":"Chat","requests":3382,"spend":84.87},{"name":"Claude Code","requests":2940,"spend":45.13},
+        {"name":"Cowork","requests":2478,"spend":171.43},{"name":"Office Agents","requests":480,"spend":0.59},
+        {"name":"Claude Design","requests":17,"spend":0.00},{"name":"Claude in Chrome","requests":3,"spend":0.00},
+        {"name":"(unattributed)","requests":2,"spend":0.00}],
+    "claude_models":[
+        {"name":"Claude Sonnet 5","requests":4926,"spend":76.40},{"name":"Claude Opus 4.8","requests":1638,"spend":39.50},
+        {"name":"Claude Fable 5","requests":837,"spend":61.00},{"name":"Claude Haiku 4.5","requests":729,"spend":0.45},
+        {"name":"Claude Opus 5","requests":676,"spend":124.16},{"name":"Claude Sonnet 4.6","requests":331,"spend":0.51},
+        {"name":"Claude Opus 4.7","requests":151,"spend":0.00},{"name":"Claude Opus 4.6","requests":12,"spend":0.00},
+        {"name":"(unattributed)","requests":2,"spend":0.00}],
+    "copilot_apps":[
+        {"name":"Outlook","interactions":3238,"users":43},{"name":"Microsoft 365 Copilot app","interactions":2535,"users":62},
+        {"name":"Word","interactions":1450,"users":28},{"name":"Edge","interactions":265,"users":15},
+        {"name":"Copilot Studio","interactions":100,"users":2},{"name":"Teams","interactions":86,"users":12},
+        {"name":"Excel","interactions":44,"users":5},{"name":"PowerPoint","interactions":25,"users":2},
+        {"name":"Other (8 apps)","interactions":50,"users":12}],
+    "top_users":[
+        {"user":"User 001","provider":"Microsoft 365 Copilot","volume":1136,"surfaces":3,"active_days":20},
+        {"user":"User 002","provider":"Microsoft 365 Copilot","volume":945,"surfaces":4,"active_days":21},
+        {"user":"User 003","provider":"Microsoft 365 Copilot","volume":522,"surfaces":4,"active_days":21},
+        {"user":"User 004","provider":"Claude Enterprise","volume":2428,"surfaces":2,"active_days":18,"spend":45.13},
+        {"user":"User 005","provider":"Claude Enterprise","volume":2150,"surfaces":5,"active_days":20,"spend":96.12},
+        {"user":"User 006","provider":"Claude Enterprise","volume":2017,"surfaces":5,"active_days":19,"spend":83.27}],
+    "caveats":["Copilot interactions and Claude API requests are different units and must not be totaled or compared as equivalent effort.",
+        "Agentic products such as Claude Code and Cowork may issue many API requests for one user action.",
+        "Usage indicates adoption and workflow mix—not employee productivity or performance.",
+        "Named-user detail should remain role-restricted and every view should be audited."]
+}
 
 async def graph_token() -> str:
     if not M365_ENABLED: raise HTTPException(503, "Microsoft 365 Copilot is not configured")
@@ -342,6 +380,16 @@ def providers(request: Request, user: str = Depends(current_user)):
         {"id":"anthropic","name":"Claude Compliance API","enabled":not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
         {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
     ]}
+
+@app.get("/api/usage")
+def usage_analytics(request: Request, user: str = Depends(current_user)):
+    audit(user,"usage_analytics_viewed","usage_analytics",source_ip=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent",""),details={"period":DEMO_USAGE["period"],"mode":"demo" if DEMO else "live"})
+    if DEMO:
+        return {**DEMO_USAGE,"mode":"demo"}
+    return {"mode":"live","period":None,"source":"Usage analytics connector not configured","summary":{},
+        "licensing":{},"claude_products":[],"claude_models":[],"copilot_apps":[],"top_users":[],
+        "caveats":["Configure monthly usage analytics ingestion to populate this view."]}
 
 @app.get("/api/audit")
 def audit_log(request: Request, limit: int = 200, actor: str = "", action: str = "", user: str = Depends(current_user)):

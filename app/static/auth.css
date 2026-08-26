@@ -34,4 +34,31 @@
 .modal-message { padding:34px; color:#697386; text-align:center; }
 #infoStatus { color:#697386; font-size:12px; }
 .build-version { margin:12px 0 8px; color:#8390a0; font:600 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.025em; }
+.usage-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px; }
+.usage-kpi { padding:15px; border:1px solid #e1e5ea; border-radius:9px; background:linear-gradient(145deg,#fff,#f8fafc); }
+.usage-kpi span,.usage-kpi em { display:block; color:#6d7785; font-size:11px; font-style:normal; }
+.usage-kpi b { display:block; margin:6px 0 4px; color:#172231; font:700 24px Georgia,serif; }
+.usage-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.usage-panel { padding:18px; border:1px solid #e1e5ea; border-radius:9px; background:#fff; }
+.usage-heading { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; }
+.usage-heading h3 { margin:2px 0 0; color:#172231; font-size:15px; }
+.usage-heading>span { color:#7a8491; font-size:10px; }
+.bar-list { display:grid; gap:10px; }
+.bar-row>div:first-child { display:flex; justify-content:space-between; gap:12px; margin-bottom:4px; font-size:11px; }
+.bar-row b { color:#303b49; font-weight:600; }
+.bar-row span { color:#737e8c; }
+.bar-track { height:6px; overflow:hidden; border-radius:99px; background:#edf0f3; }
+.bar-track i { display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,#2664d8,#40a3c8); }
+.license-list { display:grid; gap:0; }
+.license-list div { display:flex; justify-content:space-between; gap:14px; padding:10px 0; border-bottom:1px solid #edf0f3; color:#697386; font-size:12px; }
+.license-list div:last-child { border:0; }
+.license-list b { color:#273241; text-align:right; }
+.license-list .total { color:#172231; font-weight:700; }
+.usage-users { margin-top:16px; overflow:auto; }
+.usage-users tbody tr { cursor:default; }
+.usage-note { margin-top:16px; padding:16px 18px; border-left:3px solid #d4972b; background:#fff8e9; color:#5f5542; font-size:11px; line-height:1.55; }
+.usage-note b,.usage-note span { display:block; }
+.usage-note ul { margin:7px 0; padding-left:18px; }
 @media (max-width:700px) { .modal { padding:10px; } .info-body { padding:14px; } .info-grid { grid-template-columns:1fr; } }
+@media (max-width:850px) { .usage-kpis { grid-template-columns:1fr 1fr; } .usage-grid { grid-template-columns:1fr; } }
+@media (max-width:520px) { .usage-kpis { grid-template-columns:1fr; } }

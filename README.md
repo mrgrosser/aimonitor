@@ -40,6 +40,15 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Responsive UI, health check, Docker Compose, persistent volume
 - Safe demo mode with 100 realistic, threshold-qualified leadership-demo findings when no Anthropic key is present
 - Microsoft 365 Copilot Chat and Copilot-in-Office prompt/response ingestion through Microsoft Graph
+- Leadership-ready Usage & Spend dashboard for adoption, licensing, budgets, products, applications, models, and anonymized utilization
+
+## Usage and spend governance
+
+The **Usage & spend** navigation item keeps adoption and economics separate from security findings. Demo mode includes an anonymized July 2026 leadership dataset with Copilot interactions, Claude API requests and token spend, seat assignment, budget utilization, estimated monthly run rate, application/product mix, model economics, agent-assisted usage, and a role-restricted-style user sample.
+
+Copilot interactions and Claude requests are intentionally displayed as different units. They are not added together or treated as measures of employee productivity. Opening the dashboard writes a `usage_analytics_viewed` event to the access-audit chain.
+
+Live deployments currently show the module as unconfigured until a monthly analytics ingestion connector is supplied. No real identities from the source workbook are embedded in the application.
 
 ## Production notes
 
