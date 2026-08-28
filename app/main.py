@@ -24,6 +24,7 @@ from app.governance import FINDING_THRESHOLD, audit, init_db, read_audit, record
 from app.usage_reporting import get_usage_period, init_usage_db, list_usage_periods, parse_usage_file, save_usage_period, usage_csv, usage_html, usage_pdf
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
+from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -32,7 +33,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.8.3")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -72,6 +73,7 @@ init_db()
 init_usage_db()
 init_reporting_db()
 init_case_db()
+init_policy_db()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -302,7 +304,7 @@ async def enforce_page_permissions(request: Request, call_next):
         ("/api/investigation","cases"),("/api/cases","evidence"),("/api/export","evidence"),
         ("/api/activities","activity"),("/api/organizations","directory"),("/api/usage","usage"),
         ("/api/reports/usage","usage"),("/api/reports","reports"),("/api/report-schedules","reports"),("/api/connectors","reports"),
-        ("/api/audit","audit"),("/api/providers","settings")) if path.startswith(prefix)),None)
+        ("/api/audit","audit"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
     if route_page:
         try:
             require_page(request,route_page)
@@ -414,7 +416,7 @@ async def cases(request: Request, q: str = "", risk: str = "all", surface: str =
     needle = q.lower().strip()
     result=[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())]
     audit(user,"findings_searched","evidence_collection",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"query":q,"risk":risk,"surface":surface,"results":len(result)})
-    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":FINDING_THRESHOLD,"suppressed_count":suppressed_count()}
+    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count()}
 
 async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
     sem=asyncio.Semaphore(8)
@@ -621,6 +623,57 @@ def providers(request: Request, user: str = Depends(current_user)):
         {"id":"anthropic","name":"Claude Compliance API","enabled":not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
         {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
     ]}
+
+@app.get("/api/policies")
+def policies(request: Request, user: str = Depends(case_admin)):
+    audit(user,"policies_viewed","detection_policy",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
+    return {"data":list_policies(),"active":active_policy()}
+
+@app.get("/api/policies/{policy_id}")
+def policy_detail(policy_id: int, user: str = Depends(case_admin)):
+    try: return get_policy(policy_id)
+    except ValueError as exc: raise HTTPException(404,str(exc))
+
+@app.post("/api/policies")
+async def policy_create(request: Request, user: str = Depends(case_admin)):
+    body=await request.json()
+    try: policy=create_draft(str(body.get("version") or ""),str(body.get("name") or ""),str(body.get("description") or ""),user)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"policy_drafted","detection_policy",str(policy["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"]})
+    return policy
+
+@app.patch("/api/policies/{policy_id}")
+async def policy_update(policy_id: int, request: Request, user: str = Depends(case_admin)):
+    body=await request.json(); reason=str(body.pop("reason","")).strip()
+    if not reason: raise HTTPException(400,"Change reason is required")
+    try: policy=update_draft(policy_id,body,user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"policy_updated","detection_policy",str(policy_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    return policy
+
+@app.post("/api/policies/{policy_id}/approve")
+async def policy_approve(policy_id: int, request: Request, user: str = Depends(case_admin)):
+    reason=str((await request.json()).get("reason") or "")
+    try: policy=approve_policy(policy_id,user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"policy_approved","detection_policy",str(policy_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    return policy
+
+@app.post("/api/policies/{policy_id}/activate")
+async def policy_activate(policy_id: int, request: Request, user: str = Depends(case_admin)):
+    reason=str((await request.json()).get("reason") or "")
+    try: policy=activate_policy(policy_id,user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"policy_activated","detection_policy",str(policy_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    return policy
+
+@app.post("/api/policies/rollback")
+async def policy_rollback(request: Request, user: str = Depends(case_admin)):
+    reason=str((await request.json()).get("reason") or "")
+    try: policy=rollback_policy(user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"policy_rolled_back","detection_policy",str(policy["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    return policy
 
 def resolve_usage(period: str = "") -> dict[str, Any]:
     if period:

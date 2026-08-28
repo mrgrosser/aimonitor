@@ -72,14 +72,17 @@ def verify_chain() -> bool:
     return True
 
 def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
+    from app.policy_management import active_policy
+    policy=active_policy(); rules=policy["rules"]; bands=policy["severity_bands"]
     parts=[item.get("title",""),item.get("summary","")]
     for msg in item.get("messages",[]) or []: parts.append(str(msg.get("text") or msg.get("content") or ""))
     for ctx in item.get("contexts",[]) or []: parts.extend((str(ctx.get("displayName","")),str(ctx.get("contextType",""))))
     text=" ".join(parts).lower(); factors=[]; score=0
-    for name,points,pattern in RULES:
-        if re.search(pattern,text,re.I): score+=points; factors.append({"id":name,"points":points})
-    score=min(score,100); severity="critical" if score>=80 else "high" if score>=60 else "medium" if score>=40 else "low" if score>=20 else "informational"
-    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version="rules-2026.08.2",promoted=score>=FINDING_THRESHOLD)
+    for rule in rules:
+        if rule.get("enabled",True) and re.search(rule["pattern"],text,re.I):
+            score+=int(rule["points"]); factors.append({"id":rule["id"],"points":int(rule["points"])})
+    score=min(score,100); severity="critical" if score>=bands["critical"] else "high" if score>=bands["high"] else "medium" if score>=bands["medium"] else "low" if score>=bands["low"] else "informational"
+    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],promoted=score>=policy["finding_threshold"])
     return item
 
 def record_suppressed(item: dict[str,Any], provider: str) -> None:

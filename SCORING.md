@@ -11,7 +11,7 @@ JO AI Monitor currently uses a deterministic, explainable rules engine. Demo mod
 5. Assign severity from the resulting score.
 6. Promote the record only when it meets `RISK_FINDING_THRESHOLD`.
 
-The current policy version is `rules-2026.08.2`.
+The seeded baseline policy version is `rules-2026.08.2`. From v0.9.0 onward, the active version is stored in the persistent database and can be managed by a Compliance Administrator through the versioned policy workflow in Settings.
 
 | Factor | Points | Representative indicators |
 |---|---:|---|
@@ -35,7 +35,7 @@ The current policy version is `rules-2026.08.2`.
 | 20–39 | Low |
 | 0–19 | Informational |
 
-The default finding threshold is 40. Below-threshold content is not retained by JO AI Monitor; only minimal suppression metadata is recorded.
+The seeded finding threshold is 40. An approved policy version can change it without rebuilding the application. Below-threshold content is not retained by JO AI Monitor; only minimal suppression metadata is recorded.
 
 ## Worked example
 

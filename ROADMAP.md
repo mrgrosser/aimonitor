@@ -122,7 +122,16 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 
 **Goal:** Make detection policy configurable and connect JO AI Monitor to operational security workflows.
 
-### Planned capabilities
+### Delivered in v0.9.0 — policy foundation
+
+- Durable versioned detection policies seeded from the existing deterministic baseline.
+- Draft editing for rule patterns, weights, enabled state, severity bands, and finding threshold.
+- Required change reasons plus explicit approval before activation.
+- Activation history and rollback to the previous active policy.
+- Admin-only policy APIs and Settings interface with audit events for every lifecycle transition.
+- Dynamic evidence scoring that records the active policy version and threshold.
+
+### Remaining planned capabilities
 
 - Administrative editor for rules, weights, severities, and thresholds.
 - Versioned policy packs with draft, review, approval, activation, and rollback.

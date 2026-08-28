@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.8.3`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -49,6 +49,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Role-restricted named-user usage detail showing the Claude products and Copilot applications each user adopts
 - Persistent light/dark appearance switch
 - Expandable user-adoption rows with exact Copilot app interactions and Claude product request/spend allocation detail
+- Versioned detection policy packs with draft, approval, activation, rollback, configurable rules, weights, severity bands, and finding thresholds
 
 ## Usage and spend governance
 
@@ -131,6 +132,8 @@ Every record is evaluated by an explainable 0–100 rules engine before it enter
 Set `RISK_FINDING_THRESHOLD` to the minimum score that should become a full finding (default `40`). Below-threshold content is not retained by JO AI Monitor. Only minimal suppression metadata is stored: source evidence ID, provider, user ID, surface, score, rule version, observation time, and suppression reason. The upstream provider remains the system of record.
 
 The initial rules detect unauthorized access, evasion, credential exposure, production targeting, data exfiltration, regulated/personal data, confidential information, malware/exploit requests, and destructive actions. Treat the supplied weights as a transparent starting policy requiring organizational review before production.
+
+Version 0.9.0 seeds the prior `rules-2026.08.2` behavior as the initial active policy. Compliance Administrators can create a draft from the active policy in **Settings**, edit its rules and thresholds, record a required change reason, approve it, activate it, or roll back to the previous active version. Findings always record the active policy version. `RISK_FINDING_THRESHOLD` is used when the baseline policy is first created; later threshold changes are stored in the versioned policy record.
 
 ## Access audit
 
