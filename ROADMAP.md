@@ -103,6 +103,10 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Claude per-product user spend allocation labeled as estimated where the provider source lacks a cross-tab.
 - Explicit accessible appearance switch replacing the text-only theme control.
 
+### v0.8.4 refinement — planned
+
+- Add a System appearance option that follows the browser/operating-system color preference and updates when the system preference changes.
+
 ### v0.7 completion audit
 
 The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports retain duplicate protection and reconciliation warnings; reports retain actor, generation time, source, filters, and version metadata; Copilot interactions and Claude requests remain separate units; named-user reports remain role-restricted and excluded by default; and identical imports do not duplicate reporting periods.
@@ -129,6 +133,8 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Email and Microsoft Teams notifications.
 - Generic outbound webhooks with signing and retry handling.
 - SIEM export using normalized JSON and common event fields.
+- Rapid7 InsightIDR Custom Logs integration for audit events only, using HTTPS webhook or secure syslog with an explicit field allowlist that excludes prompts, responses, transcripts, attachments, and preserved evidence.
+- Delivery checkpoints, bounded retries, duplicate-safe event identifiers, connector health, and audited configuration changes for SIEM forwarding.
 - OpenTelemetry logs, traces, and metrics.
 - Alert acknowledgement, suppression, ownership, and escalation.
 - Optional real-time intervention only where provider support and formal approval permit it.
