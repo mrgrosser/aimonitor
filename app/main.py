@@ -32,7 +32,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.8.2")
+APP_VERSION = os.getenv("APP_VERSION", "0.8.3")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -193,6 +193,20 @@ DEMO_USAGE = {
         "Usage indicates adoption and workflow mix—not employee productivity or performance.",
         "Named-user detail should remain role-restricted and every view should be audited."]
 }
+
+_DEMO_USAGE_BREAKDOWNS = [
+    [{"name":"Word","volume":1092,"spend":None},{"name":"Microsoft 365 Copilot app","volume":16,"spend":None},{"name":"Excel","volume":28,"spend":None}],
+    [{"name":"Outlook","volume":851,"spend":None},{"name":"Microsoft 365 Copilot app","volume":68,"spend":None},{"name":"Word","volume":23,"spend":None},{"name":"Teams","volume":3,"spend":None}],
+    [{"name":"Outlook","volume":418,"spend":None},{"name":"Microsoft 365 Copilot app","volume":78,"spend":None},{"name":"Word","volume":15,"spend":None},{"name":"SharePoint","volume":11,"spend":None}],
+    [{"name":"Claude Code","volume":2200,"spend":40.91},{"name":"Claude.ai","volume":228,"spend":4.22}],
+    [{"name":"Claude.ai","volume":800,"spend":35.00},{"name":"Claude Code","volume":500,"spend":20.00},{"name":"Cowork","volume":700,"spend":40.00},{"name":"Office Agents","volume":140,"spend":1.12},{"name":"Claude in Chrome","volume":10,"spend":0.00}],
+    [{"name":"Claude.ai","volume":600,"spend":20.00},{"name":"Claude Code","volume":700,"spend":25.00},{"name":"Cowork","volume":600,"spend":37.77},{"name":"Claude Design","volume":100,"spend":0.50},{"name":"Office Agents","volume":17,"spend":0.00}],
+]
+for _usage_row,_breakdown in zip(DEMO_USAGE["top_users"],_DEMO_USAGE_BREAKDOWNS):
+    _usage_row["breakdown"]=_breakdown
+    _usage_row["products"]=[x["name"] for x in _breakdown]
+    _usage_row["breakdown_note"]=("Exact demonstration interactions by host app; Copilot cost is included in the license fee."
+        if _usage_row["provider"]=="Microsoft 365 Copilot" else "Demonstration allocation of user spend by Claude product.")
 
 async def graph_token() -> str:
     if not M365_ENABLED: raise HTTPException(503, "Microsoft 365 Copilot is not configured")
@@ -623,11 +637,15 @@ def resolve_usage(period: str = "") -> dict[str, Any]:
         "licensing":{},"claude_products":[],"claude_models":[],"copilot_apps":[],"top_users":[],
         "caveats":["Import monthly XLSX/CSV analytics or configure a live connector to populate this view."]}
 
+def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]:
+    identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
+    return {**data,"user_detail_included":named,"top_users":[{**row,
+        "user":row.get("user") if named else row.get("alias",row.get("user")),
+        "products":row.get("products",[]),"breakdown":row.get("breakdown",[])} for row in data.get("top_users",[])]}
+
 @app.get("/api/usage")
 def usage_analytics(request: Request, period: str = "", user: str = Depends(current_user)):
-    data=resolve_usage(period)
-    identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
-    data={**data,"user_detail_included":named,"top_users":[{**row,"user":row.get("user") if named else row.get("alias",row.get("user")),"products":row.get("products",[])} for row in data.get("top_users",[])]}
+    data=usage_for_identity(resolve_usage(period),request)
     audit(user,"usage_analytics_viewed","usage_analytics",str(data.get("period") or ""),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"mode":data.get("mode")})
     return data
@@ -649,7 +667,7 @@ async def usage_import_preview(request: Request, file: UploadFile = File(...), u
     except ValueError as exc: raise HTTPException(400,str(exc))
     audit(user,"usage_import_previewed","usage_import",str(data.get("period") or ""),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"filename":file.filename,"sha256":digest,"warnings":len(data.get("validation",{}).get("warnings",[]))})
-    return {"data":data,"source_hash":digest,"filename":file.filename}
+    return {"data":usage_for_identity(data,request),"source_hash":digest,"filename":file.filename}
 
 @app.post("/api/usage/import")
 async def usage_import(request: Request, file: UploadFile = File(...), replace: bool = False, user: str = Depends(current_user)):
@@ -664,7 +682,7 @@ async def usage_import(request: Request, file: UploadFile = File(...), replace: 
 
 @app.get("/api/reports/usage")
 def usage_report(request: Request, period: str = "", report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
-    data=resolve_usage(period); report_format=report_format.lower(); safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
+    data=usage_for_identity(resolve_usage(period),request); report_format=report_format.lower(); safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
     if report_format == "pdf": payload=usage_pdf(data,user,APP_VERSION); media="application/pdf"; ext="pdf"
     elif report_format == "csv": payload=usage_csv(data,user,APP_VERSION); media="text/csv; charset=utf-8"; ext="csv"
     elif report_format == "json": payload=json.dumps({"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"report":data},indent=2).encode(); media="application/json"; ext="json"

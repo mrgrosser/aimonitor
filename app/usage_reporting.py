@@ -83,6 +83,7 @@ def parse_xlsx(content: bytes, filename: str) -> dict[str, Any]:
     product_rows = _sheet_rows(workbook, "Claude Product & Model")
     app_rows = _sheet_rows(workbook, "Copilot App Totals")
     copilot_user_rows = _sheet_rows(workbook, "Copilot User by App")
+    claude_user_rows = _sheet_rows(workbook, "Claude User by Product")
     claude_detail_rows = _sheet_rows(workbook, "Claude Detail")
     if not summary_rows: raise ValueError("Missing required sheet: AI Usage Summary")
 
@@ -116,14 +117,36 @@ def parse_xlsx(content: bytes, filename: str) -> dict[str, Any]:
             for row in _table_after(app_rows,"App") if row[0] and str(row[0]) != "Total"]
 
     top_users = []
+    copilot_header = _find(copilot_user_rows,"User") or []
+    copilot_total_col = next((i for i,x in enumerate(copilot_header) if x == "Total"),17)
     for row in _table_after(copilot_user_rows,"User")[:10]:
-        if len(row) >= 20:
-            top_users.append({"user":_alias(row[0]),"provider":"Microsoft 365 Copilot","volume":_integer(row[17]),
-                "surfaces":_integer(row[18]),"active_days":_integer(row[19])})
+        if len(row) > copilot_total_col:
+            breakdown=[{"name":str(copilot_header[i]),"volume":_integer(row[i]),"spend":None,
+                "spend_label":"Included in license fee","basis":"Provider-reported interactions"}
+                for i in range(1,copilot_total_col) if i < len(row) and _integer(row[i])]
+            top_users.append({"user":str(row[0]),"alias":_alias(row[0]),"provider":"Microsoft 365 Copilot",
+                "volume":_integer(row[copilot_total_col]),"surfaces":len(breakdown),
+                "active_days":_integer(row[copilot_total_col+2] if len(row)>copilot_total_col+2 else 0),
+                "spend":None,"products":[x["name"] for x in breakdown],"breakdown":breakdown,
+                "breakdown_note":"Exact July interactions by host app. Copilot has no incremental per-use charge in this source."})
+    claude_matrix = {str(row[0]).strip().lower():row for row in _table_after(claude_user_rows,"User")}
+    claude_header = _find(claude_user_rows,"User") or []
+    claude_total_col = next((i for i,x in enumerate(claude_header) if x == "Total requests"),7)
     for row in claude_detail_rows:
         if row and row[0] == "by_user" and len(top_users) < 16:
-            top_users.append({"user":_alias(row[1]),"provider":"Claude Enterprise","volume":_integer(row[5]),
-                "surfaces":0,"active_days":0,"spend":round(_number(row[3]),2)})
+            identity=str(row[1]); matrix=claude_matrix.get(identity.strip().lower(),[])
+            matrix_total=_integer(matrix[claude_total_col]) if len(matrix)>claude_total_col else 0
+            user_spend=round(_number(row[3]),2); breakdown=[]
+            for i in range(1,min(claude_total_col,len(matrix))):
+                requests=_integer(matrix[i])
+                if requests:
+                    breakdown.append({"name":str(claude_header[i]),"volume":requests,
+                        "spend":round(user_spend*requests/matrix_total,2) if matrix_total else None,
+                        "basis":"Estimated allocation using product request share"})
+            top_users.append({"user":identity,"alias":_alias(identity),"provider":"Claude Enterprise",
+                "volume":_integer(row[5]),"surfaces":len(breakdown),"active_days":0,"spend":user_spend,
+                "products":[x["name"] for x in breakdown],"breakdown":breakdown,
+                "breakdown_note":"User spend is July provider data. Product requests cover 26 May–24 Aug; product dollars are an estimated proportional allocation, not provider-reported spend."})
 
     claude_spend = round(_number(spend[1] if len(spend) > 1 else 0),2)
     annual_cost = annual or 4800.0
@@ -142,7 +165,9 @@ def parse_xlsx(content: bytes, filename: str) -> dict[str, Any]:
         "copilot_apps":apps,"top_users":top_users,"caveats":[
             "Copilot interactions and Claude API requests are different units and must not be totaled or compared as equivalent effort.",
             "Agentic products may issue multiple API requests for one user action.",
-            "User identities are anonymized during import; usage is not an employee performance measure."]}
+            "Named identities are retained for approved role-restricted reporting and replaced with stable aliases for other viewers.",
+            "Claude per-product user spend is an estimated allocation because the provider export does not include a user-by-product spend cross-tab.",
+            "Usage is not an employee performance measure."]}
     return validate_usage(data)
 
 
@@ -162,7 +187,7 @@ def parse_csv(content: bytes, filename: str) -> dict[str, Any]:
         elif category == "claude_product": data["claude_products"].append({"name":name,"requests":_integer(row.get("requests")),"spend":round(_number(row.get("spend")),2)})
         elif category == "claude_model": data["claude_models"].append({"name":name,"requests":_integer(row.get("requests")),"spend":round(_number(row.get("spend")),2)})
         elif category == "copilot_app": data["copilot_apps"].append({"name":name,"interactions":_integer(row.get("interactions")),"users":_integer(row.get("users"))})
-        elif category == "top_user": data["top_users"].append({"user":_alias(name),"provider":row.get("provider") or "Unknown","volume":_integer(row.get("volume")),"surfaces":_integer(row.get("surfaces")),"active_days":_integer(row.get("active_days")),"spend":round(_number(row.get("spend")),2)})
+        elif category == "top_user": data["top_users"].append({"user":name,"alias":_alias(name),"provider":row.get("provider") or "Unknown","volume":_integer(row.get("volume")),"surfaces":_integer(row.get("surfaces")),"active_days":_integer(row.get("active_days")),"spend":round(_number(row.get("spend")),2),"breakdown":[]})
         elif category == "caveat" and name: data["caveats"].append(name)
     return validate_usage(data)
 

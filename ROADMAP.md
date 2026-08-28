@@ -96,6 +96,13 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Role-restricted named-user adoption detail showing Claude products and Copilot applications in use.
 - Persistent light and dark appearance modes.
 
+### Delivered in v0.8.3
+
+- Expandable user-adoption rows with product/application usage, share, spend, and calculation basis.
+- Exact Copilot interaction attribution by host app and clearly labeled included-license economics.
+- Claude per-product user spend allocation labeled as estimated where the provider source lacks a cross-tab.
+- Explicit accessible appearance switch replacing the text-only theme control.
+
 ### v0.7 completion audit
 
 The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports retain duplicate protection and reconciliation warnings; reports retain actor, generation time, source, filters, and version metadata; Copilot interactions and Claude requests remain separate units; named-user reports remain role-restricted and excluded by default; and identical imports do not duplicate reporting periods.

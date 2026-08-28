@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.8.2`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.8.3`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -48,6 +48,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Server-enforced page permissions mapped to Entra application roles, including a Reports-only experience
 - Role-restricted named-user usage detail showing the Claude products and Copilot applications each user adopts
 - Persistent light/dark appearance switch
+- Expandable user-adoption rows with exact Copilot app interactions and Claude product request/spend allocation detail
 
 ## Usage and spend governance
 
@@ -55,7 +56,9 @@ The **Usage & spend** navigation item keeps adoption and economics separate from
 
 Copilot interactions and Claude requests are intentionally displayed as different units. They are not added together or treated as measures of employee productivity. Opening the dashboard writes a `usage_analytics_viewed` event to the access-audit chain.
 
-Version 0.7 adds reporting-period history, validated XLSX/CSV ingestion, source SHA-256 fingerprints, duplicate protection, reconciliation warnings, and executive reports. Use **Import** in the Usage & Spend toolbar to preview a file before committing it to the persistent database. Imported user identities are converted to stable keyed aliases using `USAGE_ANONYMIZATION_KEY` (or `SESSION_SECRET` as a fallback); keep that key stable across deployments if aliases must remain consistent between periods.
+Version 0.7 adds reporting-period history, validated XLSX/CSV ingestion, source SHA-256 fingerprints, duplicate protection, reconciliation warnings, and executive reports. Use **Import** in the Usage & Spend toolbar to preview a file before committing it to the persistent database. Version 0.8.3 retains imported identities for approved named-user reporting and also generates stable keyed aliases using `USAGE_ANONYMIZATION_KEY` (or `SESSION_SECRET` as a fallback). Users without an approved usage-detail role receive only the alias. Protect the database as named-user monitoring data and keep the key stable across deployments if aliases must remain consistent between periods.
+
+The user-adoption table expands on click. Copilot rows show exact interactions by host app; the supplied source has no incremental per-use cost, so cost is displayed as “Included in license fee.” Claude user totals are provider-reported. When the source workbook lacks a true user-by-product spend cross-tab, per-product dollars are explicitly labeled as an estimated proportional allocation and the source-period mismatch is shown in the expanded row.
 
 The XLSX importer recognizes the JO AI Monitor leadership workbook structure: `AI Usage Summary`, `Claude Product & Model`, `Copilot App Totals`, `Copilot User by App`, and `Claude Detail`. Normalized CSV imports use these columns:
 
