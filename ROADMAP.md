@@ -89,6 +89,13 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 - Saved personal/shared reviewer queues with persisted filters.
 - Entra role enforcement separating case readers, investigators, and legal-hold administrators.
 
+### Delivered in v0.8.2
+
+- Server-enforced page authorization with configurable Entra application-role mappings.
+- Reports-only and usage-reader experiences with unauthorized navigation removed.
+- Role-restricted named-user adoption detail showing Claude products and Copilot applications in use.
+- Persistent light and dark appearance modes.
+
 ### v0.7 completion audit
 
 The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports retain duplicate protection and reconciliation warnings; reports retain actor, generation time, source, filters, and version metadata; Copilot interactions and Claude requests remain separate units; named-user reports remain role-restricted and excluded by default; and identical imports do not duplicate reporting periods.

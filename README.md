@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.8.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.8.2`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -45,6 +45,9 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Safe demo mode with 100 realistic, threshold-qualified leadership-demo findings when no Anthropic key is present
 - Microsoft 365 Copilot Chat and Copilot-in-Office prompt/response ingestion through Microsoft Graph
 - Leadership-ready Usage & Spend dashboard for adoption, licensing, budgets, products, applications, models, and anonymized utilization
+- Server-enforced page permissions mapped to Entra application roles, including a Reports-only experience
+- Role-restricted named-user usage detail showing the Claude products and Copilot applications each user adopts
+- Persistent light/dark appearance switch
 
 ## Usage and spend governance
 
@@ -98,6 +101,8 @@ JO AI Monitor supports native OpenID Connect using Entra's authorization-code fl
 6. Start with `LOCAL_AUTH_ENABLED=true`. After validating Entra access and recovery procedures, set it to `false`.
 
 If either `ENTRA_ALLOWED_ROLES` or `ENTRA_ALLOWED_GROUPS` is configured, the app rejects authenticated users who do not match at least one allowlisted value. App roles are recommended because they make the intended authorization boundary explicit and avoid oversized group claims.
+
+Version 0.8.2 exposes page permissions in `/api/auth/me`, hides unauthorized navigation, and independently rejects unauthorized API calls. The default roles include `Compliance.ReportsOnly`, `Compliance.ReportReader`, and `Compliance.UsageReader`; each page's role list can be overridden with the `PAGE_*_ROLES` settings in `.env.example`. `USAGE_USER_DETAIL_ROLES` separately controls access to named-user usage and product/application detail. Local admin retains full access for evaluation and recovery.
 
 ## Microsoft 365 Copilot evidence
 

@@ -32,7 +32,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.8.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.8.2")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -50,6 +50,18 @@ M365_MAX_USERS = max(1, min(int(os.getenv("M365_COPILOT_MAX_USERS", "100")), 999
 M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
 CASE_READ_ROLES = {x.strip() for x in os.getenv("CASE_READ_ROLES","Compliance.Admin,Compliance.Investigator,Compliance.Reviewer,Compliance.Auditor").split(",") if x.strip()}
 CASE_WRITE_ROLES = {x.strip() for x in os.getenv("CASE_WRITE_ROLES","Compliance.Admin,Compliance.Investigator").split(",") if x.strip()}
+PAGE_ROLE_DEFAULTS = {
+    "evidence":{"Compliance.Admin","Compliance.Investigator","Compliance.Reviewer"},
+    "cases":{"Compliance.Admin","Compliance.Investigator","Compliance.Reviewer","Compliance.Auditor"},
+    "activity":{"Compliance.Admin","Compliance.Investigator","Compliance.Reviewer","Compliance.Auditor"},
+    "usage":{"Compliance.Admin","Compliance.UsageReader"},
+    "reports":{"Compliance.Admin","Compliance.ReportReader","Compliance.ReportsOnly","Compliance.Investigator","Compliance.Reviewer","Compliance.Auditor"},
+    "directory":{"Compliance.Admin","Compliance.Investigator","Compliance.Reviewer"},
+    "audit":{"Compliance.Admin","Compliance.Auditor"},
+    "settings":{"Compliance.Admin"},
+}
+PAGE_ROLES = {page:{x.strip() for x in os.getenv(f"PAGE_{page.upper()}_ROLES",",".join(sorted(defaults))).split(",") if x.strip()} for page,defaults in PAGE_ROLE_DEFAULTS.items()}
+USAGE_USER_ROLES = {x.strip() for x in os.getenv("USAGE_USER_DETAIL_ROLES","Compliance.Admin,Compliance.UsageReader").split(",") if x.strip()}
 _graph_token: dict[str, Any] = {}
 _m365_evidence: dict[str, dict[str, Any]] = {}
 
@@ -170,12 +182,12 @@ DEMO_USAGE = {
         {"name":"Excel","interactions":44,"users":5},{"name":"PowerPoint","interactions":25,"users":2},
         {"name":"Other (8 apps)","interactions":50,"users":12}],
     "top_users":[
-        {"user":"User 001","provider":"Microsoft 365 Copilot","volume":1136,"surfaces":3,"active_days":20},
-        {"user":"User 002","provider":"Microsoft 365 Copilot","volume":945,"surfaces":4,"active_days":21},
-        {"user":"User 003","provider":"Microsoft 365 Copilot","volume":522,"surfaces":4,"active_days":21},
-        {"user":"User 004","provider":"Claude Enterprise","volume":2428,"surfaces":2,"active_days":18,"spend":45.13},
-        {"user":"User 005","provider":"Claude Enterprise","volume":2150,"surfaces":5,"active_days":20,"spend":96.12},
-        {"user":"User 006","provider":"Claude Enterprise","volume":2017,"surfaces":5,"active_days":19,"spend":83.27}],
+        {"user":"alex.morgan@northstar.example","alias":"User 001","provider":"Microsoft 365 Copilot","volume":1136,"surfaces":3,"active_days":20,"products":["Outlook","Microsoft 365 Copilot app","Word"]},
+        {"user":"sam.lee@northstar.example","alias":"User 002","provider":"Microsoft 365 Copilot","volume":945,"surfaces":4,"active_days":21,"products":["Teams","Outlook","Word","Excel"]},
+        {"user":"jamie.chen@northstar.example","alias":"User 003","provider":"Microsoft 365 Copilot","volume":522,"surfaces":4,"active_days":21,"products":["Microsoft 365 Copilot app","Edge","PowerPoint","Word"]},
+        {"user":"priya.shah@northstar.example","alias":"User 004","provider":"Claude Enterprise","volume":2428,"surfaces":2,"active_days":18,"spend":45.13,"products":["Claude Code","Claude.ai"]},
+        {"user":"taylor.reed@northstar.example","alias":"User 005","provider":"Claude Enterprise","volume":2150,"surfaces":5,"active_days":20,"spend":96.12,"products":["Claude.ai","Claude Code","Cowork","Office Agents","Claude in Chrome"]},
+        {"user":"jordan.kim@northstar.example","alias":"User 006","provider":"Claude Enterprise","volume":2017,"surfaces":5,"active_days":19,"spend":83.27,"products":["Claude.ai","Claude Code","Cowork","Claude Design","Office Agents"]}],
     "caveats":["Copilot interactions and Claude API requests are different units and must not be totaled or compared as equivalent effort.",
         "Agentic products such as Claude Code and Cowork may issue many API requests for one user action.",
         "Usage indicates adoption and workflow mix—not employee productivity or performance.",
@@ -258,6 +270,32 @@ def current_identity(request: Request) -> dict[str, Any]:
     except Exception:
         raise HTTPException(401, "Authentication required")
 
+def allowed_pages(identity: dict[str, Any]) -> list[str]:
+    if identity["method"] == "local" or "Compliance.Admin" in identity["roles"]:
+        return list(PAGE_ROLES)
+    return [page for page,roles in PAGE_ROLES.items() if identity["roles"] & roles]
+
+def require_page(request: Request, page: str) -> dict[str, Any]:
+    identity=current_identity(request)
+    if page not in allowed_pages(identity):
+        raise HTTPException(403,f"Your assigned role does not permit access to {page}")
+    return identity
+
+@app.middleware("http")
+async def enforce_page_permissions(request: Request, call_next):
+    path=request.url.path
+    route_page = next((page for prefix,page in (
+        ("/api/investigation","cases"),("/api/cases","evidence"),("/api/export","evidence"),
+        ("/api/activities","activity"),("/api/organizations","directory"),("/api/usage","usage"),
+        ("/api/reports/usage","usage"),("/api/reports","reports"),("/api/report-schedules","reports"),("/api/connectors","reports"),
+        ("/api/audit","audit"),("/api/providers","settings")) if path.startswith(prefix)),None)
+    if route_page:
+        try:
+            require_page(request,route_page)
+        except HTTPException as exc:
+            return JSONResponse({"detail":exc.detail},status_code=exc.status_code)
+    return await call_next(request)
+
 async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     if DEMO: return {"data": []}
     async with httpx.AsyncClient(timeout=30) as client:
@@ -323,7 +361,7 @@ async def entra_callback(request: Request):
 @app.get("/api/auth/me")
 def me(request: Request, user: str = Depends(current_user)):
     identity=current_identity(request)
-    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
+    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"pages":allowed_pages(identity),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"usage_user_detail":identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
 
 def can_view_named_users(request: Request) -> bool:
     identity=current_identity(request)
@@ -588,6 +626,8 @@ def resolve_usage(period: str = "") -> dict[str, Any]:
 @app.get("/api/usage")
 def usage_analytics(request: Request, period: str = "", user: str = Depends(current_user)):
     data=resolve_usage(period)
+    identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
+    data={**data,"user_detail_included":named,"top_users":[{**row,"user":row.get("user") if named else row.get("alias",row.get("user")),"products":row.get("products",[])} for row in data.get("top_users",[])]}
     audit(user,"usage_analytics_viewed","usage_analytics",str(data.get("period") or ""),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"mode":data.get("mode")})
     return data

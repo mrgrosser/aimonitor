@@ -180,3 +180,15 @@
 @media (max-width:720px) { .detail.open { display:block; width:100vw; } }
 @media (max-width:650px) { .usage-tools { position:static; align-items:stretch; flex-direction:column; margin:-14px -14px 14px; padding:12px 14px; } .usage-actions { justify-content:flex-start; } }
 @media (max-width:720px) { .section-page { grid-column:1; padding:20px; } }
+
+.product-tags{display:flex;flex-wrap:wrap;gap:5px}.product-tags span{display:inline-block;padding:3px 7px;border:1px solid var(--line);border-radius:99px;background:#f5f7fa;color:var(--ink);font-size:10px;white-space:nowrap}
+[data-theme="dark"]{color-scheme:dark;--bg:#0d131b;--ink:#e6edf5;--muted:#9aa8b8;--line:#2a3543;--nav:#080d13;--accent:#7295ff;--red:#ff7979;--amber:#f0ae4f;--green:#45d39c}
+[data-theme="dark"] body{background:var(--bg);color:var(--ink)}
+[data-theme="dark"] .login-card,[data-theme="dark"] .stats>div,[data-theme="dark"] .workspace,[data-theme="dark"] .message,[data-theme="dark"] .header-actions button,[data-theme="dark"] .detail,[data-theme="dark"] .modal-card,[data-theme="dark"] .section-page .modal-head,[data-theme="dark"] .info-card,[data-theme="dark"] .usage-panel,[data-theme="dark"] .usage-kpi{background:#151e29;color:var(--ink);border-color:var(--line)}
+[data-theme="dark"] .usage-kpi{background:linear-gradient(145deg,#172230,#111923)}
+[data-theme="dark"] .toolbar select,[data-theme="dark"] .search,[data-theme="dark"] .search input,[data-theme="dark"] .usage-tools select,[data-theme="dark"] .usage-actions a,[data-theme="dark"] .usage-actions button,[data-theme="dark"] .usage-tools>button,[data-theme="dark"] .report-filter input,[data-theme="dark"] .report-filter select,[data-theme="dark"] .schedule-form input,[data-theme="dark"] .schedule-form select{background:#182330;color:var(--ink);border-color:#354456}
+[data-theme="dark"] th{background:#111923;color:#aeb9c6}[data-theme="dark"] td,[data-theme="dark"] .info-table th,[data-theme="dark"] .info-table td{border-color:var(--line)}[data-theme="dark"] tbody tr:hover,[data-theme="dark"] tbody tr.selected{background:#1b2940}
+[data-theme="dark"] .surface,[data-theme="dark"] .product-tags span{background:#182330;color:var(--ink);border-color:#354456}
+[data-theme="dark"] .info-card h3,[data-theme="dark"] .info-card .value,[data-theme="dark"] .usage-kpi b,[data-theme="dark"] .usage-heading h3{color:var(--ink)}
+[data-theme="dark"] .usage-tools{background:#101821f2;border-color:var(--line)}
+[data-theme="dark"] .usage-note{background:#282313;color:#e6d39e}
