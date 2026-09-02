@@ -32,4 +32,13 @@ class Rapid7ExportTests(unittest.TestCase):
         with patch.object(rapid7,"_post",side_effect=RuntimeError("temporary")): result=rapid7.process_outbox()
         self.assertEqual(result["retrying"],1); self.assertEqual(rapid7.health()["pending"],1)
 
+    def test_stuck_processing_rows_are_reclaimed_after_staleness(self):
+        self.enable(); rapid7.enqueue_audit_event({"entry_hash":"hash-stuck","created_at":"2026-09-03T12:00:00Z","actor":"admin","action":"login_succeeded","object_type":"session","source_ip":""})
+        stale=(rapid7.datetime.now(rapid7.timezone.utc)-rapid7.timedelta(seconds=rapid7.PROCESSING_STALE_SECONDS+60)).isoformat()
+        db=rapid7.sqlite3.connect(rapid7.DB_PATH)
+        try: db.execute("UPDATE rapid7_outbox SET status='processing',last_attempt_at=?",(stale,)); db.commit()
+        finally: db.close()
+        with patch.object(rapid7,"_post") as post: result=rapid7.process_outbox()
+        post.assert_called_once(); self.assertEqual(result["delivered"],1)
+
 if __name__=="__main__": unittest.main()

@@ -27,6 +27,7 @@ from app.case_management import add_comment, add_note, bulk_update, case_pdf, cr
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 from app.alert_management import alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
 from app.governance_analytics import correlate_findings, usage_alerts
+from app.finding_store import delete_finding, get_finding, init_finding_db, known_versions, list_findings, prune_findings, rescore_findings, touch_seen, upsert_finding
 from app.rapid7_export import get_config as rapid7_config, health as rapid7_health, init_rapid7_db, preview_event as rapid7_preview, process_outbox as process_rapid7, send_test as rapid7_send_test, update_config as rapid7_update_config
 
 ROOT = Path(__file__).parent
@@ -36,9 +37,23 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.5")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.6")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
+
+# Live mode must never run on published example credentials or a forgeable session secret.
+_PLACEHOLDER_SECRETS = {"", "development-only-secret-change-me", "replace-with-at-least-32-random-characters"}
+def _refuse_insecure_live_config() -> None:
+    if DEMO: return
+    problems = []
+    raw_secret = os.getenv("SESSION_SECRET", "")
+    if raw_secret in _PLACEHOLDER_SECRETS or len(raw_secret) < 32:
+        problems.append("SESSION_SECRET must be a unique random value of at least 32 characters")
+    if LOCAL_AUTH and PASSWORD in ("", "change-me-now"):
+        problems.append("APP_PASSWORD is empty or the published default while local login is enabled")
+    if problems:
+        raise RuntimeError("Refusing to start in live mode: " + "; ".join(problems))
+_refuse_insecure_live_config()
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
 ENTRA_CLIENT = os.getenv("ENTRA_CLIENT_ID", "").strip()
 ENTRA_SECRET = os.getenv("ENTRA_CLIENT_SECRET", "").strip()
@@ -79,6 +94,7 @@ init_case_db()
 init_policy_db()
 init_alert_db()
 init_rapid7_db()
+init_finding_db()
 _alert_worker: asyncio.Task | None = None
 
 @app.on_event("startup")
@@ -349,13 +365,34 @@ def health(): return {"status":"ok","version":APP_VERSION,"mode":"demo" if DEMO 
 @app.get("/")
 def index(): return FileResponse(ROOT / "static" / "index.html")
 
+# Failed-login throttle. Keyed by source IP + username; behind a proxy without forwarded
+# headers every client shares the proxy IP, which over-throttles rather than under-throttles.
+LOGIN_MAX_FAILURES = max(1, int(os.getenv("LOGIN_MAX_FAILURES", "5")))
+LOGIN_FAILURE_WINDOW = max(60, int(os.getenv("LOGIN_FAILURE_WINDOW_SECONDS", "900")))
+LOGIN_LOCKOUT = max(60, int(os.getenv("LOGIN_LOCKOUT_SECONDS", "300")))
+_login_failures: dict[str, list[float]] = {}
+
+def _login_throttled(key: str) -> bool:
+    cutoff = time.time() - LOGIN_FAILURE_WINDOW
+    hits = [x for x in _login_failures.get(key, []) if x > cutoff]
+    if hits: _login_failures[key] = hits
+    else: _login_failures.pop(key, None)
+    return len(hits) >= LOGIN_MAX_FAILURES and time.time() - hits[-1] < LOGIN_LOCKOUT
+
 @app.post("/api/auth/login")
 async def login(request: Request):
     if not LOCAL_AUTH: raise HTTPException(404, "Local authentication is disabled")
     body = await request.json()
+    source_ip = request.client.host if request.client else "unknown"
+    throttle_key = f"{source_ip}:{str(body.get('username', ''))[:100]}"
+    if _login_throttled(throttle_key):
+        audit(str(body.get("username") or "unknown"),"login_throttled","session",source_ip=source_ip,user_agent=request.headers.get("user-agent",""))
+        raise HTTPException(429, "Too many failed sign-ins; try again later")
     if not (hmac.compare_digest(str(body.get("username", "")), USERNAME) and hmac.compare_digest(str(body.get("password", "")), PASSWORD)):
+        _login_failures.setdefault(throttle_key, []).append(time.time())
         audit(str(body.get("username") or "unknown"),"login_failed","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
         raise HTTPException(401, "Invalid username or password")
+    _login_failures.pop(throttle_key, None)
     response = JSONResponse({"user": USERNAME})
     response.set_cookie("cm_session", make_token(USERNAME,{"Compliance.Admin"},"local"), httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=28800)
     audit(USERNAME,"login_succeeded","session",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"method":"local"})
@@ -420,26 +457,57 @@ def case_admin(request: Request) -> str:
     if identity["method"]!="local" and "Compliance.Admin" not in identity["roles"]: raise HTTPException(403,"A Compliance Administrator role is required")
     return identity["user"]
 
+def _finding_alert(row: dict[str, Any], connectors: list[str]) -> None:
+    alert=create_alert(f"finding:{row.get('id')}:{row.get('risk_rule_version')}","policy",row["risk"],
+        f"{row['risk'].title()} AI governance finding on {row.get('surface') or 'unknown surface'}",
+        "A finding met the active policy threshold. Open JO AI Monitor for authorized evidence review.",str(row.get("id") or ""),
+        {"surface":row.get("surface"),"risk_score":row.get("risk_score"),"policy_version":row.get("risk_rule_version"),
+         "factor_ids":[factor.get("id") for factor in row.get("risk_factors",[])]})
+    for connector in connectors: queue_delivery(alert["id"],connector)
+
 async def collect_findings() -> list[dict[str, Any]]:
-    if DEMO: rows=[dict(x) for x in DEMO_CASES]
-    else:
-        chats,local,remote=await _live_index()
-        rows=await hydrate_live(chats+local+remote)+(await m365_cases() if M365_ENABLED else [])
-    promoted=[]
-    configured_connectors=[] if DEMO else [item["id"] for item in connector_health() if item["configured"]]
+    # Live mode reads the persistent store; the background sync owns provider fetching,
+    # scoring, alerting, and suppression. Demo mode keeps its in-memory path.
+    if not DEMO: return await asyncio.to_thread(list_findings)
+    rows=[dict(x) for x in DEMO_CASES]; promoted=[]
     for row in rows:
         score_evidence(row)
-        if row["promoted"]:
-            promoted.append(row)
-            alert=create_alert(f"finding:{row.get('id')}:{row.get('risk_rule_version')}","policy",row["risk"],
-                f"{row['risk'].title()} AI governance finding on {row.get('surface') or 'unknown surface'}",
-                "A finding met the active policy threshold. Open JO AI Monitor for authorized evidence review.",str(row.get("id") or ""),
-                {"surface":row.get("surface"),"risk_score":row.get("risk_score"),"policy_version":row.get("risk_rule_version"),
-                 "factor_ids":[factor.get("id") for factor in row.get("risk_factors",[])]})
-            for connector in configured_connectors: queue_delivery(alert["id"],connector)
+        if row["promoted"]: promoted.append(row); _finding_alert(row,[])
         else: record_suppressed(row,"m365" if row.get("kind")=="copilot" else "anthropic")
-    materialize_alerts(correlate_findings(promoted),configured_connectors)
+    materialize_alerts(correlate_findings(promoted),[])
     return promoted
+
+async def sync_provider_findings() -> dict[str, int]:
+    chats,local,remote=await _live_index(); index=chats+local+remote
+    if M365_ENABLED: index+=await m365_cases()
+    known=await asyncio.to_thread(known_versions); version=active_policy()["version"]
+    changed=[x for x in index if str(x.get("id")) not in known or known[str(x.get("id"))]!=((x.get("updated_at") or ""),version)]
+    hydrated=await hydrate_live([x for x in changed if x.get("kind")!="copilot"])+[x for x in changed if x.get("kind")=="copilot"]
+    connectors=[item["id"] for item in connector_health() if item["configured"]]
+    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":0}
+    for row in hydrated:
+        score_evidence(row); counts["scored"]+=1; provider="m365" if row.get("kind")=="copilot" else "anthropic"
+        if row["promoted"]:
+            await asyncio.to_thread(upsert_finding,row,provider); counts["promoted"]+=1; _finding_alert(row,connectors)
+        else:
+            record_suppressed(row,provider); await asyncio.to_thread(delete_finding,str(row.get("id"))); counts["suppressed"]+=1
+    await asyncio.to_thread(touch_seen,[str(x.get("id")) for x in index])
+    materialize_alerts(correlate_findings(await asyncio.to_thread(list_findings)),connectors)
+    counts["pruned"]=await asyncio.to_thread(prune_findings)
+    return counts
+
+@app.on_event("startup")
+async def start_finding_sync():
+    if DEMO: return
+    async def run():
+        while True:
+            try:
+                result=await sync_provider_findings()
+                if any(result[key] for key in ("promoted","suppressed","pruned")):
+                    audit("system","findings_synced","findings",details=result)
+            except Exception as exc: audit("system","finding_sync_error","findings",details={"error":str(exc)[:500]})
+            await asyncio.sleep(max(60,int(os.getenv("FINDINGS_SYNC_INTERVAL_SECONDS","300"))))
+    asyncio.create_task(run())
 
 def materialize_alerts(specs: list[dict[str,Any]], connectors: list[str] | None=None) -> list[dict[str,Any]]:
     results=[]
@@ -476,15 +544,26 @@ async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
             return item
     return await asyncio.gather(*(one(x) for x in rows))
 
-async def _live_index():
-    async def get(path):
-        try: return (await anthropic_get(path, [("limit","100")])).get("data", [])
+FINDINGS_SYNC_MAX_ITEMS = max(100, min(int(os.getenv("FINDINGS_SYNC_MAX_ITEMS", "2000")), 50000))
+
+async def _fetch_all(path: str) -> list[dict[str, Any]]:
+    """Follow has_more/last_id pagination; a single page (no has_more) degrades gracefully."""
+    items: list[dict[str, Any]] = []; after = None
+    while len(items) < FINDINGS_SYNC_MAX_ITEMS:
+        params = [("limit", "100")] + ([("after_id", after)] if after else [])
+        try: page = await anthropic_get(path, params)
         except HTTPException as e:
-            if e.status_code == 403: return []
+            if e.status_code == 403: return items
             raise
-    chats_raw = await get("/v1/compliance/apps/chats")
-    local_raw = await get("/v1/compliance/apps/sessions/local")
-    remote_raw = await get("/v1/compliance/apps/sessions/remote")
+        data = page.get("data", []); items.extend(data)
+        after = page.get("last_id") or (data[-1].get("id") if data else None)
+        if not page.get("has_more") or not data or not after: break
+    return items[:FINDINGS_SYNC_MAX_ITEMS]
+
+async def _live_index():
+    chats_raw = await _fetch_all("/v1/compliance/apps/chats")
+    local_raw = await _fetch_all("/v1/compliance/apps/sessions/local")
+    remote_raw = await _fetch_all("/v1/compliance/apps/sessions/remote")
     def norm(x, kind, surface):
         u=x.get("user") or {}; email=u.get("email_address") or x.get("user_email") or "Unknown user"
         return {"id":x.get("id"),"kind":kind,"risk":"unreviewed","status":"new","created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"user":{"id":u.get("id") or x.get("user_id"),"email":email},"surface":surface,"title":x.get("name") or x.get("title") or f"{surface} evidence","summary":"Content available for authorized review.","matched":[]}
@@ -496,6 +575,9 @@ async def case_detail(case_id: str, request: Request, user: str = Depends(curren
         item = next((x for x in DEMO_CASES if x["id"] == case_id), None)
         if not item: raise HTTPException(404, "Evidence not found")
         audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":item.get("surface")}); return score_evidence(item)
+    stored=await asyncio.to_thread(get_finding,case_id)
+    if stored:
+        audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":stored.get("surface")}); return stored
     if case_id.startswith("m365:"):
         item=_m365_evidence.get(case_id)
         if not item:
@@ -708,7 +790,8 @@ async def policy_activate(policy_id: int, request: Request, user: str = Depends(
     reason=str((await request.json()).get("reason") or "")
     try: policy=activate_policy(policy_id,user,reason)
     except ValueError as exc: raise HTTPException(400,str(exc))
-    audit(user,"policy_activated","detection_policy",str(policy_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    rescore={} if DEMO else await asyncio.to_thread(rescore_findings)
+    audit(user,"policy_activated","detection_policy",str(policy_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason,**rescore})
     return policy
 
 @app.post("/api/policies/rollback")
@@ -716,7 +799,8 @@ async def policy_rollback(request: Request, user: str = Depends(case_admin)):
     reason=str((await request.json()).get("reason") or "")
     try: policy=rollback_policy(user,reason)
     except ValueError as exc: raise HTTPException(400,str(exc))
-    audit(user,"policy_rolled_back","detection_policy",str(policy["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
+    rescore={} if DEMO else await asyncio.to_thread(rescore_findings)
+    audit(user,"policy_rolled_back","detection_policy",str(policy["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason,**rescore})
     return policy
 
 @app.get("/api/alerts")

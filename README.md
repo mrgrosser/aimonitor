@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.5`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.6`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -96,7 +96,7 @@ Version 0.8.1 completes the investigation milestone with threaded comments, hash
 - Put the Compliance Access Key in your orchestrator's secret store, not `.env` or an image.
 - This MVP intentionally exposes no Compliance API delete operations.
 - The Compliance API is retrospective. For real-time prompt blocking, use Anthropic Inference Hooks; for live telemetry, consider OpenTelemetry.
-- The current live list is a direct API view. Production evidence retention, case annotations, legal hold, append-only audit logs, and cryptographic export manifests should use a durable database/object store.
+- Live findings are synchronized into the persistent database with pagination and retained per `FINDING_RETENTION_DAYS`. Production-grade object storage, controlled schema migrations, and cryptographic export manifests remain on the v1.0 roadmap.
 
 ## Microsoft Entra ID / SSO
 
@@ -134,7 +134,9 @@ Every record is evaluated by an explainable 0–100 rules engine before it enter
 - 20–39: low
 - 0–19: informational
 
-Set `RISK_FINDING_THRESHOLD` to the minimum score that should become a full finding (default `40`). Below-threshold content is not retained by JO AI Monitor. Only minimal suppression metadata is stored: source evidence ID, provider, user ID, surface, score, rule version, observation time, and suppression reason. The upstream provider remains the system of record.
+Set `RISK_FINDING_THRESHOLD` to the minimum score that should become a full finding (default `40`). Below-threshold content is not retained by JO AI Monitor. Only minimal suppression metadata is stored: source evidence ID, provider, user ID, surface, score, rule version, observation time, and suppression reason. The upstream provider remains the system of record for raw activity.
+
+Version 0.9.6 makes promoted findings durable in live mode: a background job (default every 5 minutes, `FINDINGS_SYNC_INTERVAL_SECONDS`) pages through the provider APIs, scores new or changed evidence once, and stores findings that meet the threshold in the persistent database. Page views and reports read the database instead of calling providers, and alerting/suppression happen only in the sync job. Promoted evidence is retained for `FINDING_RETENTION_DAYS` (default 180; `0` disables pruning); investigation-case snapshots and legal holds are separate records and are never pruned. Activating or rolling back a policy re-scores every stored finding.
 
 The initial rules detect unauthorized access, evasion, credential exposure, production targeting, data exfiltration, regulated/personal data, confidential information, malware/exploit requests, and destructive actions. Treat the supplied weights as a transparent starting policy requiring organizational review before production.
 

@@ -23,6 +23,7 @@ ALERT_EMAIL_TO=[x.strip() for x in os.getenv("ALERT_EMAIL_TO","").split(",") if 
 TEAMS_WEBHOOK_URL=os.getenv("TEAMS_WEBHOOK_URL","").strip(); ALERT_WEBHOOK_URL=os.getenv("ALERT_WEBHOOK_URL","").strip()
 ALERT_WEBHOOK_SECRET=os.getenv("ALERT_WEBHOOK_SECRET","").encode(); ALERT_PUBLIC_URL=os.getenv("ALERT_PUBLIC_URL","").rstrip("/")
 DELIVERY_MAX_ATTEMPTS=max(1,min(int(os.getenv("ALERT_DELIVERY_MAX_ATTEMPTS","5")),20))
+PROCESSING_STALE_SECONDS=max(60,int(os.getenv("ALERT_PROCESSING_STALE_SECONDS","600")))
 
 def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
@@ -161,8 +162,11 @@ def _deliver(connector: str, alert: dict[str,Any], delivery: dict[str,Any]) -> N
 def process_deliveries(limit: int=25) -> dict[str,int]:
     init_alert_db(); now=datetime.now(timezone.utc); counts={"delivered":0,"retrying":0,"failed":0}
     with _lock, closing(sqlite3.connect(DB_PATH)) as db:
-        db.row_factory=sqlite3.Row; db.execute("BEGIN IMMEDIATE"); rows=db.execute("""SELECT * FROM alert_deliveries WHERE status IN ('pending','retrying')
-            AND (next_attempt_at IS NULL OR next_attempt_at<=?) AND attempts<? ORDER BY id LIMIT ?""",(now.isoformat(),DELIVERY_MAX_ATTEMPTS,min(max(limit,1),100))).fetchall()
+        # A row left in 'processing' by a crash or restart is reclaimable once it is stale.
+        stale=(now-timedelta(seconds=PROCESSING_STALE_SECONDS)).isoformat()
+        db.row_factory=sqlite3.Row; db.execute("BEGIN IMMEDIATE"); rows=db.execute("""SELECT * FROM alert_deliveries WHERE attempts<?
+            AND (status IN ('pending','retrying') AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                 OR status='processing' AND last_attempt_at<=?) ORDER BY id LIMIT ?""",(DELIVERY_MAX_ATTEMPTS,now.isoformat(),stale,min(max(limit,1),100))).fetchall()
         if rows: db.executemany("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",[(now.isoformat(),row["id"]) for row in rows])
         db.commit()
     for raw in rows:

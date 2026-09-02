@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ RULES = [
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as db:
+    with closing(sqlite3.connect(DB_PATH)) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("""CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
@@ -37,16 +38,20 @@ def init_db() -> None:
             evidence_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL, provider TEXT,
             user_id TEXT, surface TEXT, risk_score INTEGER NOT NULL,
             reason TEXT NOT NULL, rule_version TEXT NOT NULL)""")
+        columns={row[1] for row in db.execute("PRAGMA table_info(suppressed_evidence)").fetchall()}
+        if "updated_at" not in columns: db.execute("ALTER TABLE suppressed_evidence ADD COLUMN updated_at TEXT")
+        db.commit()
 
 def audit(actor: str, action: str, object_type: str = "", object_id: str = "",
           source_ip: str = "", user_agent: str = "", details: dict[str, Any] | None = None) -> None:
     init_db(); created=datetime.now(timezone.utc).isoformat(); detail=json.dumps(details or {},sort_keys=True,separators=(",",":"))
-    with _lock, sqlite3.connect(DB_PATH) as db:
+    with _lock, closing(sqlite3.connect(DB_PATH)) as db:
         row=db.execute("SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone(); previous=row[0] if row else "GENESIS"
         canonical="|".join((created,actor,action,object_type,object_id,source_ip,user_agent,detail,previous))
         digest=hashlib.sha256(canonical.encode()).hexdigest()
         db.execute("INSERT INTO audit_log(created_at,actor,action,object_type,object_id,source_ip,user_agent,details,previous_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (created,actor,action,object_type,object_id,source_ip,user_agent,detail,previous,digest))
+        db.commit()
     try:
         from app.rapid7_export import enqueue_audit_event
         enqueue_audit_event({"entry_hash":digest,"created_at":created,"actor":actor,"action":action,"object_type":object_type,"object_id":object_id,"source_ip":source_ip})
@@ -60,14 +65,14 @@ def read_audit(limit: int = 200, actor: str = "", action: str = "") -> list[dict
     sql="SELECT id,created_at,actor,action,object_type,object_id,source_ip,user_agent,details,previous_hash,entry_hash FROM audit_log"
     if where: sql+=" WHERE "+" AND ".join(where)
     sql+=" ORDER BY id DESC LIMIT ?"; params.append(min(max(limit,1),1000))
-    with sqlite3.connect(DB_PATH) as db:
+    with closing(sqlite3.connect(DB_PATH)) as db:
         rows=db.execute(sql,params).fetchall()
     keys=("id","created_at","actor","action","object_type","object_id","source_ip","user_agent","details","previous_hash","entry_hash")
     return [{**dict(zip(keys,r)),"details":json.loads(r[8])} for r in rows]
 
 def verify_chain() -> bool:
     init_db()
-    with sqlite3.connect(DB_PATH) as db: rows=db.execute("SELECT created_at,actor,action,object_type,object_id,source_ip,user_agent,details,previous_hash,entry_hash FROM audit_log ORDER BY id").fetchall()
+    with closing(sqlite3.connect(DB_PATH)) as db: rows=db.execute("SELECT created_at,actor,action,object_type,object_id,source_ip,user_agent,details,previous_hash,entry_hash FROM audit_log ORDER BY id").fetchall()
     previous="GENESIS"
     for r in rows:
         if r[8]!=previous: return False
@@ -121,10 +126,11 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
 
 def record_suppressed(item: dict[str,Any], provider: str) -> None:
     init_db(); user=item.get("user") or {}; reason="below_finding_threshold"
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version) VALUES(?,?,?,?,?,?,?,?)",
-            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown")))
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown"),item.get("updated_at")))
+        db.commit()
 
 def suppressed_count() -> int:
     init_db()
-    with sqlite3.connect(DB_PATH) as db: return db.execute("SELECT COUNT(*) FROM suppressed_evidence").fetchone()[0]
+    with closing(sqlite3.connect(DB_PATH)) as db: return db.execute("SELECT COUNT(*) FROM suppressed_evidence").fetchone()[0]

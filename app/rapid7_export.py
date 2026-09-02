@@ -13,6 +13,7 @@ from app.governance import DB_PATH
 
 RAPID7_WEBHOOK_URL=os.getenv("RAPID7_WEBHOOK_URL","").strip()
 MAX_ATTEMPTS=max(1,min(int(os.getenv("RAPID7_MAX_ATTEMPTS","8")),20))
+PROCESSING_STALE_SECONDS=max(60,int(os.getenv("RAPID7_PROCESSING_STALE_SECONDS","600")))
 DEFAULT_CATEGORIES=["authentication","authorization","policy","case","alert","delivery","audit","system"]
 DEFAULT_FIELDS=["event_id","timestamp","actor","action","object_type","object_id","source_ip","category"]
 PROHIBITED={"prompt","response","transcript","attachment","evidence","messages","content","summary","query"}
@@ -90,9 +91,12 @@ def process_outbox(limit: int=100) -> dict[str,int]:
     init_rapid7_db(); now=datetime.now(timezone.utc); result={"delivered":0,"retrying":0,"failed":0}
     if not get_config()["enabled"]: return result
     with _lock, closing(sqlite3.connect(DB_PATH)) as db:
+        # A row left in 'processing' by a crash or restart is reclaimable once it is stale.
+        stale=(now-timedelta(seconds=PROCESSING_STALE_SECONDS)).isoformat()
         db.row_factory=sqlite3.Row; db.execute("BEGIN IMMEDIATE"); rows=db.execute("""SELECT * FROM rapid7_outbox
-            WHERE status IN ('pending','retrying') AND (next_attempt_at IS NULL OR next_attempt_at<=?) AND attempts<? ORDER BY id LIMIT ?""",
-            (now.isoformat(),MAX_ATTEMPTS,min(max(limit,1),500))).fetchall()
+            WHERE attempts<? AND (status IN ('pending','retrying') AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                 OR status='processing' AND last_attempt_at<=?) ORDER BY id LIMIT ?""",
+            (MAX_ATTEMPTS,now.isoformat(),stale,min(max(limit,1),500))).fetchall()
         if rows: db.executemany("UPDATE rapid7_outbox SET status='processing',last_attempt_at=? WHERE id=?",[(now.isoformat(),row["id"]) for row in rows])
         db.commit()
     for raw in rows:

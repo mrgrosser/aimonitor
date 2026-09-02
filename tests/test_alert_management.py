@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,5 +62,24 @@ class AlertManagementTests(unittest.TestCase):
         with patch.object(alerts,"DELIVERY_MAX_ATTEMPTS",1), patch.object(alerts,"_deliver",side_effect=RuntimeError("permanent failure")):
             result=alerts.process_deliveries()
         self.assertEqual(result["failed"],1); self.assertEqual(alerts.list_deliveries(alert["id"])[0]["status"],"failed")
+
+    def test_stuck_processing_rows_are_reclaimed_after_staleness(self):
+        alert=alerts.create_alert("finding:stuck","policy","high","Stuck","Minimal summary"); delivery=alerts.queue_delivery(alert["id"],"webhook")
+        stale=(datetime.now(timezone.utc)-timedelta(seconds=alerts.PROCESSING_STALE_SECONDS+60)).isoformat()
+        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+            db.execute("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",(stale,delivery["id"])); db.commit()
+        with patch.object(alerts,"_deliver") as deliver:
+            result=alerts.process_deliveries()
+        deliver.assert_called_once(); self.assertEqual(result["delivered"],1)
+        self.assertEqual(alerts.list_deliveries(alert["id"])[0]["status"],"delivered")
+
+    def test_fresh_processing_rows_are_not_reclaimed(self):
+        alert=alerts.create_alert("finding:inflight","policy","high","Inflight","Minimal summary"); delivery=alerts.queue_delivery(alert["id"],"email")
+        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+            db.execute("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",(alerts._now(),delivery["id"])); db.commit()
+        with patch.object(alerts,"_deliver") as deliver:
+            result=alerts.process_deliveries()
+        deliver.assert_not_called(); self.assertEqual(result,{"delivered":0,"retrying":0,"failed":0})
+        self.assertEqual(alerts.list_deliveries(alert["id"])[0]["status"],"processing")
 
 if __name__=="__main__": unittest.main()
