@@ -25,7 +25,7 @@ from app.usage_reporting import get_usage_period, init_usage_db, list_usage_peri
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
-from app.alert_management import alert_timeline, create_alert, get_alert, init_alert_db, list_alerts, queue_delivery, update_alert
+from app.alert_management import alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -34,7 +34,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.2")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.3")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -76,6 +76,21 @@ init_reporting_db()
 init_case_db()
 init_policy_db()
 init_alert_db()
+_alert_worker: asyncio.Task | None = None
+
+@app.on_event("startup")
+async def start_alert_worker():
+    global _alert_worker
+    async def run():
+        while True:
+            await asyncio.sleep(max(5,int(os.getenv("ALERT_DELIVERY_INTERVAL_SECONDS","30"))))
+            try: await asyncio.to_thread(process_deliveries)
+            except Exception as exc: audit("system","alert_delivery_worker_error","alert_delivery",details={"error":str(exc)[:500]})
+    _alert_worker=asyncio.create_task(run())
+
+@app.on_event("shutdown")
+async def stop_alert_worker():
+    if _alert_worker: _alert_worker.cancel()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -306,7 +321,7 @@ async def enforce_page_permissions(request: Request, call_next):
         ("/api/investigation","cases"),("/api/cases","evidence"),("/api/export","evidence"),
         ("/api/activities","activity"),("/api/organizations","directory"),("/api/usage","usage"),
         ("/api/reports/usage","usage"),("/api/reports","reports"),("/api/report-schedules","reports"),("/api/connectors","reports"),
-        ("/api/audit","audit"),("/api/alerts","cases"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
+        ("/api/audit","audit"),("/api/alerts","cases"),("/api/alert-connectors","cases"),("/api/alert-deliveries","cases"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
     if route_page:
         try:
             require_page(request,route_page)
@@ -406,9 +421,17 @@ async def collect_findings() -> list[dict[str, Any]]:
         chats,local,remote=await _live_index()
         rows=await hydrate_live(chats+local+remote)+(await m365_cases() if M365_ENABLED else [])
     promoted=[]
+    configured_connectors=[] if DEMO else [item["id"] for item in connector_health() if item["configured"]]
     for row in rows:
         score_evidence(row)
-        if row["promoted"]: promoted.append(row)
+        if row["promoted"]:
+            promoted.append(row)
+            alert=create_alert(f"finding:{row.get('id')}:{row.get('risk_rule_version')}","policy",row["risk"],
+                f"{row['risk'].title()} AI governance finding on {row.get('surface') or 'unknown surface'}",
+                "A finding met the active policy threshold. Open JO AI Monitor for authorized evidence review.",str(row.get("id") or ""),
+                {"surface":row.get("surface"),"risk_score":row.get("risk_score"),"policy_version":row.get("risk_rule_version"),
+                 "factor_ids":[factor.get("id") for factor in row.get("risk_factors",[])]})
+            for connector in configured_connectors: queue_delivery(alert["id"],connector)
         else: record_suppressed(row,"m365" if row.get("kind")=="copilot" else "anthropic")
     return promoted
 
@@ -680,6 +703,18 @@ async def policy_rollback(request: Request, user: str = Depends(case_admin)):
 @app.get("/api/alerts")
 def alerts(request: Request, status: str="", owner: str="", limit: int=200, user: str=Depends(case_reader)):
     result=list_alerts(status,owner,limit); audit(user,"alerts_viewed","alert",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"status":status,"owner":owner,"count":len(result)}); return {"data":result}
+
+@app.get("/api/alert-connectors")
+def alert_connectors(request: Request, user: str=Depends(case_reader)):
+    result=connector_health(); audit(user,"alert_connectors_viewed","configuration",details={"connectors":[{"id":x["id"],"configured":x["configured"]} for x in result]}); return {"data":result}
+
+@app.get("/api/alert-deliveries")
+def alert_deliveries(alert_id: str="", limit: int=200, user: str=Depends(case_reader)):
+    return {"data":list_deliveries(alert_id,limit)}
+
+@app.post("/api/alert-deliveries/process")
+def alert_deliveries_process(request: Request, user: str=Depends(case_admin)):
+    result=process_deliveries(); audit(user,"alert_deliveries_processed","alert_delivery",details=result); return result
 
 @app.get("/api/alerts/{alert_id}")
 def alert_detail(alert_id: str, user: str=Depends(case_reader)):

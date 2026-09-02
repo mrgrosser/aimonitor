@@ -1,6 +1,6 @@
 # JO AI Monitor Security Review Handoff
 
-This checklist prepares version 0.9.2 for review by Security, Compliance, Privacy, and Infrastructure. It does not represent production approval.
+This checklist prepares version 0.9.3 for review by Security, Compliance, Privacy, and Infrastructure. It does not represent production approval.
 
 ## Review scope
 

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app import alert_management as alerts
 
@@ -29,5 +30,36 @@ class AlertManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"reason"): alerts.update_alert(alert["id"],{"owner":"analyst"},"analyst","")
         suppressed=alerts.update_alert(alert["id"],{"status":"suppressed","suppressed_until":"2099-01-01T00:00:00Z"},"analyst","Approved exception")
         self.assertEqual(suppressed["status"],"suppressed")
+
+    def test_delivery_success_and_retry_are_checkpointed(self):
+        alert=alerts.create_alert("finding:delivery","policy","high","Deliver","Minimal summary")
+        alerts.queue_delivery(alert["id"],"webhook")
+        with patch.object(alerts,"_deliver") as deliver:
+            self.assertEqual(alerts.process_deliveries(),{"delivered":1,"retrying":0,"failed":0}); deliver.assert_called_once()
+        row=alerts.list_deliveries(alert["id"])[0]; self.assertEqual(row["status"],"delivered"); self.assertEqual(row["attempts"],1)
+        second=alerts.create_alert("finding:retry","policy","medium","Retry","Minimal summary"); alerts.queue_delivery(second["id"],"teams")
+        with patch.object(alerts,"_deliver",side_effect=RuntimeError("temporary failure")):
+            result=alerts.process_deliveries()
+        self.assertEqual(result["retrying"],1); row=alerts.list_deliveries(second["id"])[0]; self.assertEqual(row["status"],"retrying"); self.assertTrue(row["next_attempt_at"])
+
+    def test_connector_health_never_exposes_secrets(self):
+        health=alerts.connector_health(); self.assertEqual({x["id"] for x in health},{"email","teams","webhook"})
+        self.assertNotIn("url",str(health).lower()); self.assertNotIn("secret",str(health).lower())
+
+    def test_generic_webhook_is_hmac_signed(self):
+        alert=alerts.create_alert("finding:signed","policy","high","Signed","Minimal summary")
+        delivery=alerts.queue_delivery(alert["id"],"webhook")
+        with patch.object(alerts,"ALERT_WEBHOOK_URL","https://collector.example/alerts"), patch.object(alerts,"ALERT_WEBHOOK_SECRET",b"test-secret"), patch.object(alerts,"_post_json") as post:
+            alerts._deliver("webhook",alert,delivery)
+        url,payload,headers=post.call_args.args
+        body=alerts.json.dumps(payload,separators=(",",":"),sort_keys=True).encode()
+        expected=alerts.hmac.new(b"test-secret",body,alerts.hashlib.sha256).hexdigest()
+        self.assertEqual(url,"https://collector.example/alerts"); self.assertEqual(headers["X-JO-Signature-256"],f"sha256={expected}")
+
+    def test_terminal_delivery_failure_stops_retrying(self):
+        alert=alerts.create_alert("finding:terminal","policy","high","Terminal","Minimal summary"); alerts.queue_delivery(alert["id"],"email")
+        with patch.object(alerts,"DELIVERY_MAX_ATTEMPTS",1), patch.object(alerts,"_deliver",side_effect=RuntimeError("permanent failure")):
+            result=alerts.process_deliveries()
+        self.assertEqual(result["failed"],1); self.assertEqual(alerts.list_deliveries(alert["id"])[0]["status"],"failed")
 
 if __name__=="__main__": unittest.main()

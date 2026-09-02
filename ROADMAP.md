@@ -148,15 +148,21 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Idempotent Email, Teams, and generic webhook delivery queue records.
 - Case-role-protected alert APIs; payloads retain minimal summaries rather than prompt evidence.
 
+### Delivered in v0.9.3 — alert delivery
+
+- Automatic duplicate-safe alerts for findings that meet the active policy threshold.
+- Background SMTP, Microsoft Teams Workflow, and generic HTTPS webhook delivery.
+- HMAC-SHA256 webhook signatures and stable event identifiers for receiver-side deduplication.
+- Atomic delivery claiming, exponential backoff, bounded attempts, terminal failure state, and delivery checkpoints.
+- Connector health and delivery history APIs that never expose destinations, credentials, or secrets.
+- Analyst queue in Cases for ownership, acknowledgment, resolution, connector delivery, and failure visibility.
+
 ### Remaining planned capabilities
 
 - Repeat-event and behavioral-risk correlation.
 - Cost, budget, model, and unused-license alerts.
-- Email and Microsoft Teams notifications.
-- Generic outbound webhooks with signing and retry handling.
 - SIEM export using normalized JSON and common event fields.
 - Rapid7 InsightIDR Custom Logs integration for audit events only, using HTTPS webhook or secure syslog with an explicit field allowlist that excludes prompts, responses, transcripts, attachments, and preserved evidence.
-- Delivery checkpoints, bounded retries, duplicate-safe event identifiers, connector health, and audited configuration changes for SIEM forwarding.
 - OpenTelemetry logs, traces, and metrics.
 - Optional real-time intervention only where provider support and formal approval permit it.
 

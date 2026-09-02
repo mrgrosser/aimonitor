@@ -1,16 +1,28 @@
 import json
+import hashlib
+import hmac
+import os
+import smtplib
 import sqlite3
 import threading
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from typing import Any
+from urllib.request import Request, urlopen
 
 from app.governance import DB_PATH
 
 _lock=threading.Lock()
 STATUSES={"open","acknowledged","suppressed","resolved"}
 ESCALATIONS={"none","management","incident_response","legal"}
+SMTP_HOST=os.getenv("SMTP_HOST","").strip(); SMTP_PORT=int(os.getenv("SMTP_PORT","587")); SMTP_FROM=os.getenv("SMTP_FROM","").strip()
+SMTP_USERNAME=os.getenv("SMTP_USERNAME","").strip(); SMTP_PASSWORD=os.getenv("SMTP_PASSWORD",""); SMTP_TLS=os.getenv("SMTP_TLS","true").lower()=="true"
+ALERT_EMAIL_TO=[x.strip() for x in os.getenv("ALERT_EMAIL_TO","").split(",") if x.strip()]
+TEAMS_WEBHOOK_URL=os.getenv("TEAMS_WEBHOOK_URL","").strip(); ALERT_WEBHOOK_URL=os.getenv("ALERT_WEBHOOK_URL","").strip()
+ALERT_WEBHOOK_SECRET=os.getenv("ALERT_WEBHOOK_SECRET","").encode(); ALERT_PUBLIC_URL=os.getenv("ALERT_PUBLIC_URL","").rstrip("/")
+DELIVERY_MAX_ATTEMPTS=max(1,min(int(os.getenv("ALERT_DELIVERY_MAX_ATTEMPTS","5")),20))
 
 def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
@@ -99,3 +111,68 @@ def queue_delivery(alert_id: str, connector: str) -> dict[str,Any]:
         db.execute("INSERT OR IGNORE INTO alert_deliveries(alert_id,connector,idempotency_key,status) VALUES(?,?,?,'pending')",(alert_id,connector,key)); db.commit()
         db.row_factory=sqlite3.Row; row=db.execute("SELECT * FROM alert_deliveries WHERE connector=? AND idempotency_key=?",(connector,key)).fetchone()
     return dict(row)
+
+def list_deliveries(alert_id: str="", limit: int=200) -> list[dict[str,Any]]:
+    init_alert_db(); sql="SELECT * FROM alert_deliveries"; params=[]
+    if alert_id: sql+=" WHERE alert_id=?"; params.append(alert_id)
+    sql+=" ORDER BY id DESC LIMIT ?"; params.append(min(max(limit,1),1000))
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        db.row_factory=sqlite3.Row; return [dict(row) for row in db.execute(sql,params).fetchall()]
+
+def connector_health() -> list[dict[str,Any]]:
+    configured={"email":bool(SMTP_HOST and SMTP_FROM and ALERT_EMAIL_TO),"teams":bool(TEAMS_WEBHOOK_URL),"webhook":bool(ALERT_WEBHOOK_URL and ALERT_WEBHOOK_SECRET)}
+    init_alert_db(); result=[]
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        for connector,enabled in configured.items():
+            failed=db.execute("SELECT COUNT(*) FROM alert_deliveries WHERE connector=? AND status='failed'",(connector,)).fetchone()[0]
+            pending=db.execute("SELECT COUNT(*) FROM alert_deliveries WHERE connector=? AND status IN ('pending','retrying')",(connector,)).fetchone()[0]
+            row=db.execute("SELECT delivered_at,last_error FROM alert_deliveries WHERE connector=? ORDER BY id DESC LIMIT 1",(connector,)).fetchone()
+            result.append({"id":connector,"configured":enabled,"pending":pending,"failed":failed,"last_delivered_at":row[0] if row else None,"last_error":row[1] if row else ""})
+    return result
+
+def _payload(alert: dict[str,Any], delivery: dict[str,Any]) -> dict[str,Any]:
+    return {"schema":"jo-ai-monitor.alert.v1","event_id":delivery["idempotency_key"],"alert_id":alert["id"],
+        "type":alert["alert_type"],"severity":alert["severity"],"title":alert["title"],"summary":alert["summary"],
+        "status":alert["status"],"created_at":alert["created_at"],"url":f"{ALERT_PUBLIC_URL}/#cases" if ALERT_PUBLIC_URL else ""}
+
+def _post_json(url: str, payload: dict[str,Any], headers: dict[str,str] | None=None) -> None:
+    body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); request=Request(url,data=body,method="POST",headers={"Content-Type":"application/json",**(headers or {})})
+    with urlopen(request,timeout=20) as response:
+        if response.status>=300: raise RuntimeError(f"HTTP {response.status}")
+
+def _deliver(connector: str, alert: dict[str,Any], delivery: dict[str,Any]) -> None:
+    payload=_payload(alert,delivery)
+    if connector=="email":
+        if not (SMTP_HOST and SMTP_FROM and ALERT_EMAIL_TO): raise RuntimeError("Email alert delivery is not configured")
+        message=EmailMessage(); message["From"]=SMTP_FROM; message["To"]=", ".join(ALERT_EMAIL_TO); message["Subject"]=f"[{alert['severity'].upper()}] JO AI Monitor: {alert['title']}"
+        message.set_content(f"{alert['summary']}\n\nAlert: {alert['id']}\nStatus: {alert['status']}\n{payload['url']}")
+        with smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=20) as smtp:
+            if SMTP_TLS: smtp.starttls()
+            if SMTP_USERNAME: smtp.login(SMTP_USERNAME,SMTP_PASSWORD)
+            smtp.send_message(message)
+    elif connector=="teams":
+        if not TEAMS_WEBHOOK_URL: raise RuntimeError("Teams alert delivery is not configured")
+        _post_json(TEAMS_WEBHOOK_URL,{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","weight":"Bolder","text":alert["title"]},{"type":"TextBlock","text":alert["summary"],"wrap":True},{"type":"FactSet","facts":[{"title":"Severity","value":alert["severity"]},{"title":"Alert","value":alert["id"]}]}]}}]},{"X-JO-Event-ID":delivery["idempotency_key"]})
+    else:
+        if not (ALERT_WEBHOOK_URL and ALERT_WEBHOOK_SECRET): raise RuntimeError("Signed webhook delivery is not configured")
+        body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); signature=hmac.new(ALERT_WEBHOOK_SECRET,body,hashlib.sha256).hexdigest()
+        _post_json(ALERT_WEBHOOK_URL,payload,{"X-JO-Event-ID":delivery["idempotency_key"],"X-JO-Signature-256":f"sha256={signature}"})
+
+def process_deliveries(limit: int=25) -> dict[str,int]:
+    init_alert_db(); now=datetime.now(timezone.utc); counts={"delivered":0,"retrying":0,"failed":0}
+    with _lock, closing(sqlite3.connect(DB_PATH)) as db:
+        db.row_factory=sqlite3.Row; db.execute("BEGIN IMMEDIATE"); rows=db.execute("""SELECT * FROM alert_deliveries WHERE status IN ('pending','retrying')
+            AND (next_attempt_at IS NULL OR next_attempt_at<=?) AND attempts<? ORDER BY id LIMIT ?""",(now.isoformat(),DELIVERY_MAX_ATTEMPTS,min(max(limit,1),100))).fetchall()
+        if rows: db.executemany("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",[(now.isoformat(),row["id"]) for row in rows])
+        db.commit()
+    for raw in rows:
+        delivery=dict(raw); attempt=delivery["attempts"]+1
+        try:
+            _deliver(delivery["connector"],get_alert(delivery["alert_id"]),delivery); status="delivered"; error=""; delivered_at=_now(); next_attempt=None; counts["delivered"]+=1
+        except Exception as exc:
+            final=attempt>=DELIVERY_MAX_ATTEMPTS; status="failed" if final else "retrying"; error=str(exc)[:500]; delivered_at=None
+            next_attempt=None if final else (now+timedelta(seconds=min(30*(2**(attempt-1)),3600))).isoformat(); counts[status]+=1
+        with _lock, closing(sqlite3.connect(DB_PATH)) as db:
+            db.execute("UPDATE alert_deliveries SET status=?,attempts=?,last_attempt_at=?,next_attempt_at=?,last_error=?,delivered_at=? WHERE id=?",
+                (status,attempt,_now(),next_attempt,error,delivered_at,delivery["id"])); db.commit()
+    return counts
