@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.0`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -47,9 +47,10 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Leadership-ready Usage & Spend dashboard for adoption, licensing, budgets, products, applications, models, and anonymized utilization
 - Server-enforced page permissions mapped to Entra application roles, including a Reports-only experience
 - Role-restricted named-user usage detail showing the Claude products and Copilot applications each user adopts
-- Persistent light/dark appearance switch
+- Persistent System/light/dark appearance switch that follows operating-system changes
 - Expandable user-adoption rows with exact Copilot app interactions and Claude product request/spend allocation detail
 - Versioned detection policy packs with draft, approval, activation, rollback, configurable rules, weights, severity bands, and finding thresholds
+- Scoped thresholds, time-bound exceptions, separation of policy duties, and an approval-aware IT-only application-generation control
 
 ## Usage and spend governance
 

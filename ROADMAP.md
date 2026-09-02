@@ -131,12 +131,17 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Admin-only policy APIs and Settings interface with audit events for every lifecycle transition.
 - Dynamic evidence scoring that records the active policy version and threshold.
 
+### Delivered in v0.9.1 — governance controls
+
+- Per-provider, surface, business-unit, and category threshold overrides.
+- User, group, surface, and workflow exceptions with optional expiration.
+- Separation of duties for policy drafting, approval, and activation.
+- Default detection requiring an IT identity and approval reference for application-generation requests.
+- Finding provenance for effective threshold, matched scopes, and applied exception.
+- System, Light, and Dark appearance modes with live operating-system preference updates.
+
 ### Remaining planned capabilities
 
-- Administrative editor for rules, weights, severities, and thresholds.
-- Versioned policy packs with draft, review, approval, activation, and rollback.
-- Per-provider, surface, business-unit, and category thresholds.
-- Documented allowlists, approved workflows, and time-bounded exceptions.
 - Repeat-event and behavioral-risk correlation.
 - Cost, budget, model, and unused-license alerts.
 - Email and Microsoft Teams notifications.

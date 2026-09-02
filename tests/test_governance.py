@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from app import governance, policy_management
@@ -42,6 +43,53 @@ class GovernanceScoringTests(unittest.TestCase):
         self.assertFalse(scored["promoted"])
         rolled=policy_management.rollback_policy("admin","Restore baseline")
         self.assertEqual(rolled["version"],baseline["version"])
+
+    def test_app_generation_requires_it_and_approval(self):
+        unauthorized=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"alex@example.com","department":"Sales"},"messages":[]})
+        self.assertTrue(unauthorized["promoted"])
+        self.assertEqual({x["id"] for x in unauthorized["risk_factors"]},{"unauthorized_app_generation","app_generation_without_approval"})
+        approved=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"it@example.com","department":"IT"},"approval_id":"ITSSC-42","messages":[]})
+        self.assertFalse(approved["promoted"])
+
+    def test_scoped_threshold_and_time_bound_exception(self):
+        draft=policy_management.create_draft("rules-test-scope","Scoped policy","Unit test","author")
+        draft["scope_overrides"]=[{"id":"finance","business_unit":"Finance","finding_threshold":90}]
+        draft["exceptions"]=[{"id":"pilot","type":"user","value":"pilot@example.com","expires_at":"2099-01-01T00:00:00Z","reason":"Approved pilot","approved_by":"security"}]
+        policy_management.update_draft(draft["id"],draft,"author","Add approved scope and exception")
+        policy_management.approve_policy(draft["id"],"reviewer","Reviewed")
+        policy_management.activate_policy(draft["id"],"deployer","Deploy")
+        scoped=score_evidence({"title":"API keys","summary":"production credentials","business_unit":"Finance","messages":[]})
+        self.assertEqual(scoped["risk_threshold"],90)
+        self.assertFalse(scoped["promoted"])
+        excepted=score_evidence({"title":"hack root access","summary":"production","user":{"email":"pilot@example.com"},"messages":[]})
+        self.assertEqual(excepted["policy_exception_id"],"pilot")
+        self.assertFalse(excepted["promoted"])
+
+    def test_policy_separation_of_duties(self):
+        draft=policy_management.create_draft("rules-test-duties","Duties","Unit test","author")
+        with self.assertRaisesRegex(ValueError,"different person"):
+            policy_management.approve_policy(draft["id"],"author","Self approval")
+        policy_management.approve_policy(draft["id"],"reviewer","Reviewed")
+        with self.assertRaisesRegex(ValueError,"different person"):
+            policy_management.activate_policy(draft["id"],"reviewer","Self activation")
+
+    def test_existing_policy_database_migrates(self):
+        legacy=Path(self.temp.name)/"legacy.db"
+        db=sqlite3.connect(legacy)
+        try:
+            db.execute("""CREATE TABLE detection_policies (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL,
+                finding_threshold INTEGER NOT NULL, severity_bands_json TEXT NOT NULL, rules_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, created_by TEXT NOT NULL, approved_at TEXT, approved_by TEXT,
+                activated_at TEXT, activated_by TEXT, previous_active_id INTEGER, change_reason TEXT NOT NULL DEFAULT '')""")
+            db.commit()
+        finally: db.close()
+        policy_management.DB_PATH=legacy; policy_management._cache=None; policy_management.init_policy_db()
+        db=sqlite3.connect(legacy)
+        try:
+            columns={row[1] for row in db.execute("PRAGMA table_info(detection_policies)")}
+        finally: db.close()
+        self.assertTrue({"scope_overrides_json","exceptions_json","controls_json"}.issubset(columns))
 
 
 if __name__ == "__main__":

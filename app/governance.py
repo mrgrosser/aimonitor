@@ -81,8 +81,37 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
     for rule in rules:
         if rule.get("enabled",True) and re.search(rule["pattern"],text,re.I):
             score+=int(rule["points"]); factors.append({"id":rule["id"],"points":int(rule["points"])})
+    controls=policy.get("controls") or {}; user=item.get("user") or {}; groups=[str(x).casefold() for x in (user.get("groups") or item.get("groups") or [])]
+    app_request=bool(re.search(str(controls.get("app_generation_pattern") or r"$^"),text,re.I))
+    it_values={str(x).casefold() for x in controls.get("it_group_values",[])}
+    is_it=bool(it_values.intersection(groups)) or str(user.get("department") or item.get("business_unit") or "").casefold() in it_values
+    approved=bool(item.get("approval_id") or item.get("approved_workflow"))
+    if app_request and controls.get("only_it_can_generate_apps",True) and not is_it:
+        score+=60; factors.append({"id":"unauthorized_app_generation","points":60})
+    if app_request and controls.get("app_generation_requires_approval",True) and not approved:
+        score+=40; factors.append({"id":"app_generation_without_approval","points":40})
+    now=datetime.now(timezone.utc); exception=None
+    for candidate in policy.get("exceptions") or []:
+        expires=candidate.get("expires_at")
+        if expires:
+            expires_at=datetime.fromisoformat(expires.replace("Z","+00:00"))
+            if expires_at.tzinfo is None: expires_at=expires_at.replace(tzinfo=timezone.utc)
+            if expires_at<=now: continue
+        value=str(candidate.get("value") or "").casefold(); kind=candidate.get("type")
+        matched=(kind=="user" and value in {str(user.get("id") or "").casefold(),str(user.get("email") or "").casefold()})
+        matched=matched or (kind=="group" and value in groups) or (kind=="surface" and value==str(item.get("surface") or "").casefold())
+        matched=matched or (kind=="workflow" and value==str(item.get("workflow") or "").casefold())
+        if matched: exception=candidate; break
+    threshold=policy["finding_threshold"]
+    context={"provider":item.get("provider"),"surface":item.get("surface"),"business_unit":item.get("business_unit") or user.get("department"),"category":item.get("category")}
+    matching=[]
+    for scope in policy.get("scope_overrides") or []:
+        if all(not scope.get(key) or str(scope[key]).casefold()==str(context.get(key) or "").casefold() for key in context): matching.append(scope)
+    if matching: threshold=max(int(scope["finding_threshold"]) for scope in matching)
     score=min(score,100); severity="critical" if score>=bands["critical"] else "high" if score>=bands["high"] else "medium" if score>=bands["medium"] else "low" if score>=bands["low"] else "informational"
-    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],promoted=score>=policy["finding_threshold"])
+    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
+        risk_scope_ids=[scope["id"] for scope in matching],policy_exception_id=exception.get("id") if exception else None,
+        promoted=score>=threshold and exception is None)
     return item
 
 def record_suppressed(item: dict[str,Any], provider: str) -> None:
