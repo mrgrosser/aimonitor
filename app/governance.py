@@ -47,6 +47,11 @@ def audit(actor: str, action: str, object_type: str = "", object_id: str = "",
         digest=hashlib.sha256(canonical.encode()).hexdigest()
         db.execute("INSERT INTO audit_log(created_at,actor,action,object_type,object_id,source_ip,user_agent,details,previous_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (created,actor,action,object_type,object_id,source_ip,user_agent,detail,previous,digest))
+    try:
+        from app.rapid7_export import enqueue_audit_event
+        enqueue_audit_event({"entry_hash":digest,"created_at":created,"actor":actor,"action":action,"object_type":object_type,"object_id":object_id,"source_ip":source_ip})
+    except Exception:
+        pass
 
 def read_audit(limit: int = 200, actor: str = "", action: str = "") -> list[dict[str,Any]]:
     init_db(); where=[]; params=[]

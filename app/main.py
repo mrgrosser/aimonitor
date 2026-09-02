@@ -27,6 +27,7 @@ from app.case_management import add_comment, add_note, bulk_update, case_pdf, cr
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 from app.alert_management import alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
 from app.governance_analytics import correlate_findings, usage_alerts
+from app.rapid7_export import get_config as rapid7_config, health as rapid7_health, init_rapid7_db, preview_event as rapid7_preview, process_outbox as process_rapid7, send_test as rapid7_send_test, update_config as rapid7_update_config
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -35,7 +36,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.4")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.5")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -77,6 +78,7 @@ init_reporting_db()
 init_case_db()
 init_policy_db()
 init_alert_db()
+init_rapid7_db()
 _alert_worker: asyncio.Task | None = None
 
 @app.on_event("startup")
@@ -85,7 +87,9 @@ async def start_alert_worker():
     async def run():
         while True:
             await asyncio.sleep(max(5,int(os.getenv("ALERT_DELIVERY_INTERVAL_SECONDS","30"))))
-            try: await asyncio.to_thread(process_deliveries)
+            try:
+                await asyncio.to_thread(process_deliveries)
+                await asyncio.to_thread(process_rapid7)
             except Exception as exc: audit("system","alert_delivery_worker_error","alert_delivery",details={"error":str(exc)[:500]})
     _alert_worker=asyncio.create_task(run())
 
@@ -322,7 +326,7 @@ async def enforce_page_permissions(request: Request, call_next):
         ("/api/investigation","cases"),("/api/cases","evidence"),("/api/export","evidence"),
         ("/api/activities","activity"),("/api/organizations","directory"),("/api/usage","usage"),
         ("/api/reports/usage","usage"),("/api/reports","reports"),("/api/report-schedules","reports"),("/api/connectors","reports"),
-        ("/api/audit","audit"),("/api/alerts","cases"),("/api/alert-connectors","cases"),("/api/alert-deliveries","cases"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
+        ("/api/audit","audit"),("/api/alerts","cases"),("/api/alert-connectors","cases"),("/api/alert-deliveries","cases"),("/api/providers","settings"),("/api/policies","settings"),("/api/rapid7","settings")) if path.startswith(prefix)),None)
     if route_page:
         try:
             require_page(request,route_page)
@@ -730,6 +734,27 @@ def alert_deliveries(alert_id: str="", limit: int=200, user: str=Depends(case_re
 @app.post("/api/alert-deliveries/process")
 def alert_deliveries_process(request: Request, user: str=Depends(case_admin)):
     result=process_deliveries(); audit(user,"alert_deliveries_processed","alert_delivery",details=result); return result
+
+@app.get("/api/rapid7/config")
+def get_rapid7_config(user: str=Depends(case_admin)):
+    return {"config":rapid7_config(),"health":rapid7_health(),"preview":rapid7_preview()}
+
+@app.put("/api/rapid7/config")
+async def put_rapid7_config(request: Request, user: str=Depends(case_admin)):
+    body=await request.json(); reason=str(body.get("reason") or "")
+    try: result=rapid7_update_config(bool(body.get("enabled")),body.get("categories") or [],body.get("fields") or [],user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"rapid7_configuration_changed","configuration","rapid7",details={"enabled":result["enabled"],"categories":result["categories"],"fields":result["fields"],"reason":reason}); return result
+
+@app.post("/api/rapid7/test")
+def test_rapid7(request: Request, user: str=Depends(case_admin)):
+    try: rapid7_send_test()
+    except (ValueError,RuntimeError,OSError) as exc: raise HTTPException(502,str(exc))
+    audit(user,"rapid7_test_succeeded","configuration","rapid7"); return {"ok":True}
+
+@app.post("/api/rapid7/process")
+def process_rapid7_now(request: Request, user: str=Depends(case_admin)):
+    result=process_rapid7(); audit(user,"rapid7_outbox_processed","delivery","rapid7",details=result); return result
 
 @app.get("/api/alerts/{alert_id}")
 def alert_detail(alert_id: str, user: str=Depends(case_reader)):

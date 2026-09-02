@@ -166,11 +166,17 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Model-cost concentration alerts comparing spend share with request share.
 - Duplicate-safe alerts per reporting period with automatic approved-connector delivery.
 
+### Delivered in v0.9.5 — Rapid7 SIEM integration
+
+- Rapid7 InsightIDR Custom Logs delivery through a secret HTTPS webhook destination.
+- Administrator enable/pause control, event-category selection, strict field allowlist, and exact payload preview.
+- Server-side prohibition of prompt, response, transcript, attachment, evidence, query, summary, and content fields.
+- Durable SQLite outbox with atomic claiming, stable event IDs, retries, checkpoints, and terminal failure state.
+- Test delivery, pending/failed counts, last-delivery status, and audited reason-required configuration changes.
+- OpenTelemetry deferred to optional post-1.0 instrumentation because Rapid7 is the approved operational logging destination.
+
 ### Remaining planned capabilities
 
-- SIEM export using normalized JSON and common event fields.
-- Rapid7 InsightIDR Custom Logs integration for audit events only, using HTTPS webhook or secure syslog with an explicit field allowlist that excludes prompts, responses, transcripts, attachments, and preserved evidence.
-- OpenTelemetry logs, traces, and metrics.
 - Optional real-time intervention only where provider support and formal approval permit it.
 
 ### Acceptance criteria
@@ -221,6 +227,7 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Cross-provider identity and campaign correlation.
 - Executive governance scorecards and organizational benchmarks.
 - API for approved downstream reporting, SIEM, GRC, and case-management systems.
+- Optional OpenTelemetry traces and metrics if operational review requires telemetry beyond Rapid7 logs.
 
 ## Security and Compliance approval gates
 

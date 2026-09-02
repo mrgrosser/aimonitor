@@ -1,6 +1,6 @@
 # JO AI Monitor Security Review Handoff
 
-This checklist prepares version 0.9.4 for review by Security, Compliance, Privacy, and Infrastructure. It does not represent production approval.
+This checklist prepares version 0.9.5 for review by Security, Compliance, Privacy, and Infrastructure. It does not represent production approval.
 
 ## Review scope
 
@@ -27,7 +27,7 @@ This checklist prepares version 0.9.4 for review by Security, Compliance, Privac
 - Limit Graph user discovery with an explicit pilot list or reviewed safety cap.
 - Treat prompts, responses, named usage, attachments, and audit identities as sensitive monitoring data.
 - Require human review before disciplinary, access-control, or other adverse action.
-- Keep Rapid7 forwarding disabled until its audit-only field allowlist and destination are approved.
+- Keep Rapid7 forwarding disabled until its audit-only field allowlist and destination are approved; validate the payload preview and test event before enabling it.
 
 ## v1.0 exit criteria
 

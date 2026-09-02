@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.4`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.5`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -54,6 +54,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Durable alert lifecycle with ownership, acknowledgment, expiring suppression, escalation, resolution, timelines, and duplicate-safe delivery queueing
 - Background Email, Teams Workflow, and HMAC-signed webhook delivery with bounded retry, checkpoints, connector health, and an analyst alert queue
 - Privacy-preserving repeat-finding correlation plus aggregate budget, cost-concentration, run-rate, and unused-license alerts
+- Optional Rapid7 InsightIDR audit forwarding with an interface-controlled field allowlist, payload preview, durable outbox, retries, test delivery, and health status
 
 ## Usage and spend governance
 
@@ -144,3 +145,5 @@ Version 0.9.0 seeds the prior `rules-2026.08.2` behavior as the initial active p
 JO AI Monitor writes an append-only audit event for local and Entra sign-ins, failed sign-ins, sign-outs, searches and filters, evidence views, exports, provider views, directory/activity access, and audit-log access. Each event includes actor, timestamp, source IP, user agent, action, object, and structured context.
 
 Audit entries form a SHA-256 hash chain: every record includes the prior record's hash, and `/api/audit` verifies the chain before returning results. The **Access audit** navigation item displays the ledger and its current integrity status. Persist `DATABASE_PATH` on durable storage; Docker Compose maps it to `/data/jo-ai-monitor.db`.
+
+Version 0.9.5 can forward an explicitly approved subset of those audit events to a Rapid7 InsightIDR Custom Logs HTTPS webhook. Set `RAPID7_WEBHOOK_URL` as a deployment secret, then use **Settings → Rapid7 InsightIDR Custom Logs** to select categories and fields, preview the exact payload, send a test, and enable forwarding. Prompt, response, transcript, attachment, evidence, query, summary, and content fields are rejected by the server. The destination URL is never returned to the browser or stored in SQLite.
