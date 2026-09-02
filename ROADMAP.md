@@ -157,10 +157,17 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Connector health and delivery history APIs that never expose destinations, credentials, or secrets.
 - Analyst queue in Cases for ownership, acknowledgment, resolution, connector delivery, and failure visibility.
 
+### Delivered in v0.9.4 — correlation and financial governance
+
+- Configurable repeat-event correlation by hashed identity and contributing policy factor.
+- Minimal behavioral alerts showing event count, surfaces, factor, and time window without clear identity or prompt content.
+- Aggregate Claude usage-budget threshold alerts.
+- Unassigned-license alerts and configurable absolute monthly run-rate alerts.
+- Model-cost concentration alerts comparing spend share with request share.
+- Duplicate-safe alerts per reporting period with automatic approved-connector delivery.
+
 ### Remaining planned capabilities
 
-- Repeat-event and behavioral-risk correlation.
-- Cost, budget, model, and unused-license alerts.
 - SIEM export using normalized JSON and common event fields.
 - Rapid7 InsightIDR Custom Logs integration for audit events only, using HTTPS webhook or secure syslog with an explicit field allowlist that excludes prompts, responses, transcripts, attachments, and preserved evidence.
 - OpenTelemetry logs, traces, and metrics.

@@ -26,6 +26,7 @@ from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 from app.alert_management import alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
+from app.governance_analytics import correlate_findings, usage_alerts
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -34,7 +35,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.3")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.4")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -433,7 +434,21 @@ async def collect_findings() -> list[dict[str, Any]]:
                  "factor_ids":[factor.get("id") for factor in row.get("risk_factors",[])]})
             for connector in configured_connectors: queue_delivery(alert["id"],connector)
         else: record_suppressed(row,"m365" if row.get("kind")=="copilot" else "anthropic")
+    materialize_alerts(correlate_findings(promoted),configured_connectors)
     return promoted
+
+def materialize_alerts(specs: list[dict[str,Any]], connectors: list[str] | None=None) -> list[dict[str,Any]]:
+    results=[]
+    for spec in specs:
+        alert=create_alert(str(spec["event_key"]),str(spec["alert_type"]),str(spec["severity"]),str(spec["title"]),str(spec["summary"]),
+            str(spec.get("finding_id") or ""),spec.get("metadata") or {})
+        for connector in connectors or []: queue_delivery(alert["id"],connector)
+        results.append(alert)
+    return results
+
+def generate_usage_alerts(data: dict[str,Any]) -> list[dict[str,Any]]:
+    connectors=[] if DEMO or data.get("mode")=="demo" else [item["id"] for item in connector_health() if item["configured"]]
+    return materialize_alerts(usage_alerts(data),connectors)
 
 @app.get("/api/cases")
 async def cases(request: Request, q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
@@ -765,7 +780,7 @@ def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]
 
 @app.get("/api/usage")
 def usage_analytics(request: Request, period: str = "", user: str = Depends(current_user)):
-    data=usage_for_identity(resolve_usage(period),request)
+    raw=resolve_usage(period); generate_usage_alerts(raw); data=usage_for_identity(raw,request)
     audit(user,"usage_analytics_viewed","usage_analytics",str(data.get("period") or ""),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"mode":data.get("mode")})
     return data
@@ -795,6 +810,7 @@ async def usage_import(request: Request, file: UploadFile = File(...), replace: 
     try:
         data,digest=parse_usage_file(content,file.filename or "usage.xlsx")
         save_usage_period(data,file.filename or "usage.xlsx",digest,user,replace)
+        generate_usage_alerts({**data,"mode":"imported"})
     except ValueError as exc: raise HTTPException(409 if "already" in str(exc) else 400,str(exc))
     audit(user,"usage_period_imported","usage_period",str(data["period"]),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"filename":file.filename,"sha256":digest,"replace":replace})
