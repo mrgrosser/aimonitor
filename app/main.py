@@ -25,6 +25,7 @@ from app.usage_reporting import get_usage_period, init_usage_db, list_usage_peri
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
+from app.alert_management import alert_timeline, create_alert, get_alert, init_alert_db, list_alerts, queue_delivery, update_alert
 
 ROOT = Path(__file__).parent
 USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -33,7 +34,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.2")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
@@ -74,6 +75,7 @@ init_usage_db()
 init_reporting_db()
 init_case_db()
 init_policy_db()
+init_alert_db()
 
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
@@ -304,7 +306,7 @@ async def enforce_page_permissions(request: Request, call_next):
         ("/api/investigation","cases"),("/api/cases","evidence"),("/api/export","evidence"),
         ("/api/activities","activity"),("/api/organizations","directory"),("/api/usage","usage"),
         ("/api/reports/usage","usage"),("/api/reports","reports"),("/api/report-schedules","reports"),("/api/connectors","reports"),
-        ("/api/audit","audit"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
+        ("/api/audit","audit"),("/api/alerts","cases"),("/api/providers","settings"),("/api/policies","settings")) if path.startswith(prefix)),None)
     if route_page:
         try:
             require_page(request,route_page)
@@ -674,6 +676,36 @@ async def policy_rollback(request: Request, user: str = Depends(case_admin)):
     except ValueError as exc: raise HTTPException(400,str(exc))
     audit(user,"policy_rolled_back","detection_policy",str(policy["id"]),request.client.host if request.client else "",request.headers.get("user-agent",""),{"version":policy["version"],"reason":reason})
     return policy
+
+@app.get("/api/alerts")
+def alerts(request: Request, status: str="", owner: str="", limit: int=200, user: str=Depends(case_reader)):
+    result=list_alerts(status,owner,limit); audit(user,"alerts_viewed","alert",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"status":status,"owner":owner,"count":len(result)}); return {"data":result}
+
+@app.get("/api/alerts/{alert_id}")
+def alert_detail(alert_id: str, user: str=Depends(case_reader)):
+    try: return {"alert":get_alert(alert_id),"timeline":alert_timeline(alert_id)}
+    except ValueError as exc: raise HTTPException(404,str(exc))
+
+@app.post("/api/alerts")
+async def alert_create(request: Request, user: str=Depends(case_writer)):
+    body=await request.json()
+    try: result=create_alert(str(body.get("event_key") or ""),str(body.get("alert_type") or "policy"),str(body.get("severity") or "medium"),str(body.get("title") or ""),str(body.get("summary") or ""),str(body.get("finding_id") or ""),body.get("metadata") or {},user)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"alert_created","alert",result["id"],details={"event_key":result["event_key"],"severity":result["severity"]}); return result
+
+@app.patch("/api/alerts/{alert_id}")
+async def alert_update(alert_id: str, request: Request, user: str=Depends(case_writer)):
+    body=await request.json(); reason=str(body.pop("reason","") or "")
+    try: result=update_alert(alert_id,body,user,reason)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"alert_updated","alert",alert_id,details={"reason":reason,"status":result["status"],"owner":result["owner"],"escalation":result["escalation"]}); return result
+
+@app.post("/api/alerts/{alert_id}/deliveries")
+async def alert_delivery(alert_id: str, request: Request, user: str=Depends(case_writer)):
+    connector=str((await request.json()).get("connector") or "")
+    try: result=queue_delivery(alert_id,connector)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    audit(user,"alert_delivery_queued","alert",alert_id,details={"connector":connector,"idempotency_key":result["idempotency_key"]}); return result
 
 def resolve_usage(period: str = "") -> dict[str, Any]:
     if period:

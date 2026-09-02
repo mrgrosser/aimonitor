@@ -24,7 +24,7 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.1`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.2`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 ## Connect Anthropic
 
@@ -51,6 +51,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Expandable user-adoption rows with exact Copilot app interactions and Claude product request/spend allocation detail
 - Versioned detection policy packs with draft, approval, activation, rollback, configurable rules, weights, severity bands, and finding thresholds
 - Scoped thresholds, time-bound exceptions, separation of policy duties, and an approval-aware IT-only application-generation control
+- Durable alert lifecycle with ownership, acknowledgment, expiring suppression, escalation, resolution, timelines, and duplicate-safe delivery queueing
 
 ## Usage and spend governance
 

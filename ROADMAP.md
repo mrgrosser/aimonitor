@@ -140,6 +140,14 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Finding provenance for effective threshold, matched scopes, and applied exception.
 - System, Light, and Dark appearance modes with live operating-system preference updates.
 
+### Delivered in v0.9.2 — alert operations foundation
+
+- Durable alert records with duplicate-safe event keys.
+- Investigator ownership, acknowledgment, expiring suppression, resolution, and escalation states.
+- Reason-required changes and a complete per-alert timeline plus application audit events.
+- Idempotent Email, Teams, and generic webhook delivery queue records.
+- Case-role-protected alert APIs; payloads retain minimal summaries rather than prompt evidence.
+
 ### Remaining planned capabilities
 
 - Repeat-event and behavioral-risk correlation.
@@ -150,7 +158,6 @@ The v0.7 acceptance criteria were regression-tested during v0.8.1. Usage imports
 - Rapid7 InsightIDR Custom Logs integration for audit events only, using HTTPS webhook or secure syslog with an explicit field allowlist that excludes prompts, responses, transcripts, attachments, and preserved evidence.
 - Delivery checkpoints, bounded retries, duplicate-safe event identifiers, connector health, and audited configuration changes for SIEM forwarding.
 - OpenTelemetry logs, traces, and metrics.
-- Alert acknowledgement, suppression, ownership, and escalation.
 - Optional real-time intervention only where provider support and formal approval permit it.
 
 ### Acceptance criteria
