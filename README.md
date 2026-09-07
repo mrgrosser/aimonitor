@@ -74,6 +74,8 @@ category,name,period,value,text,requests,interactions,spend,users,provider,volum
 
 Supported categories are `summary`, `licensing`, `claude_product`, `claude_model`, `copilot_app`, `top_user`, and `caveat`. Summary and licensing rows put the metric key in `name` and its value in `value`.
 
+Usage imports and replacements require local admin, `Compliance.Admin`, or a role explicitly listed in `USAGE_IMPORT_ROLES`, plus Usage page access. Read-only users do not see import controls.
+
 The reporting toolbar generates audited PDF, CSV, JSON, and printable HTML reports for the selected period. Live deployments without an imported period or analytics connector display an explicit unconfigured state. No real identities from the original source workbook are embedded in the application.
 
 ## Compliance reports and scheduling
@@ -136,7 +138,7 @@ Every record is evaluated by an explainable 0–100 rules engine before it enter
 
 Set `RISK_FINDING_THRESHOLD` to the minimum score that should become a full finding (default `40`). Below-threshold content is not retained by JO AI Monitor. Only minimal suppression metadata is stored: source evidence ID, provider, user ID, surface, score, rule version, observation time, and suppression reason. The upstream provider remains the system of record for raw activity.
 
-Version 0.9.6 makes promoted findings durable in live mode: a background job (default every 5 minutes, `FINDINGS_SYNC_INTERVAL_SECONDS`) pages through the provider APIs, scores new or changed evidence once, and stores findings that meet the threshold in the persistent database. Page views and reports read the database instead of calling providers, and alerting/suppression happen only in the sync job. Promoted evidence is retained for `FINDING_RETENTION_DAYS` (default 180; `0` disables pruning); investigation-case snapshots and legal holds are separate records and are never pruned. Activating or rolling back a policy re-scores every stored finding.
+Version 0.9.6 makes promoted findings durable in live mode: a background job (default every 5 minutes, `FINDINGS_SYNC_INTERVAL_SECONDS`) pages through the provider APIs, scores new or changed evidence once, and stores findings that meet the threshold in the persistent database. Page views and reports read the database instead of calling providers, and alerting/suppression happen only in the sync job. Promoted evidence is retained for `FINDING_RETENTION_DAYS` (default 180; `0` disables pruning); investigation-case snapshots and legal holds are separate records and are never pruned. Expired finding IDs are retained as minimal tombstones so provider history cannot recreate expired evidence, even after a policy change. Time-bound policy exceptions are reevaluated on the next successful sync after expiry. Activating or rolling back a policy re-scores every stored finding.
 
 The initial rules detect unauthorized access, evasion, credential exposure, production targeting, data exfiltration, regulated/personal data, confidential information, malware/exploit requests, and destructive actions. Treat the supplied weights as a transparent starting policy requiring organizational review before production.
 

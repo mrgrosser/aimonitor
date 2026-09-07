@@ -65,8 +65,30 @@ def create_alert(event_key: str, alert_type: str, severity: str, title: str, sum
         db.commit(); row=db.execute("SELECT * FROM alerts WHERE id=?",(alert_id,)).fetchone()
     return _alert(row)
 
+def expire_suppressions() -> int:
+    """Reopen expired (or invalid legacy) suppressions and record each transition once."""
+    init_alert_db(); now = datetime.now(timezone.utc); count = 0
+    with _lock, closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute("SELECT id,suppressed_until FROM alerts WHERE status='suppressed'").fetchall()
+        for alert_id, value in rows:
+            try:
+                due = datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+                if due.tzinfo is None: due = due.replace(tzinfo=timezone.utc)
+                if due > now: continue
+                reason = "Alert suppression expired"
+            except ValueError:
+                reason = "Invalid legacy suppression expiration"
+            db.execute("UPDATE alerts SET status='open',suppressed_until=NULL,updated_at=?,reason=? WHERE id=?", (now.isoformat(),reason,alert_id))
+            db.execute("INSERT INTO alert_timeline(alert_id,created_at,actor,action,reason,changes_json) VALUES(?,?,?,?,?,?)",
+                       (alert_id,now.isoformat(),"system","suppression_expired",reason,json.dumps({"status":"open","suppressed_until":None})))
+            count += 1
+        db.commit()
+    return count
+
+
 def list_alerts(status: str="", owner: str="", limit: int=200) -> list[dict[str,Any]]:
-    init_alert_db(); where=[]; params=[]
+    expire_suppressions(); where=[]; params=[]
     if status: where.append("status=?"); params.append(status)
     if owner: where.append("owner=?"); params.append(owner)
     sql="SELECT * FROM alerts"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY created_at DESC LIMIT ?"; params.append(min(max(limit,1),1000))
@@ -74,7 +96,7 @@ def list_alerts(status: str="", owner: str="", limit: int=200) -> list[dict[str,
         db.row_factory=sqlite3.Row; return [_alert(row) for row in db.execute(sql,params).fetchall()]
 
 def get_alert(alert_id: str) -> dict[str,Any]:
-    init_alert_db()
+    expire_suppressions()
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.row_factory=sqlite3.Row; row=db.execute("SELECT * FROM alerts WHERE id=?",(alert_id,)).fetchone()
     if not row: raise ValueError("Alert not found")
@@ -88,6 +110,16 @@ def update_alert(alert_id: str, changes: dict[str,Any], actor: str, reason: str)
     if escalation not in ESCALATIONS: raise ValueError("Invalid escalation")
     owner=str(changes.get("owner",current["owner"])).strip(); suppressed_until=str(changes.get("suppressed_until",current.get("suppressed_until") or "")).strip() or None
     if status=="suppressed" and not suppressed_until: raise ValueError("Suppressed alerts require an expiration")
+    if status == "suppressed":
+        try:
+            due = datetime.fromisoformat(suppressed_until.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Suppression expiration must be ISO-8601") from exc
+        if due.tzinfo is None: raise ValueError("Suppression expiration requires a timezone")
+        if due <= datetime.now(timezone.utc): raise ValueError("Suppression expiration must be in the future")
+        suppressed_until = due.astimezone(timezone.utc).isoformat()
+    else:
+        suppressed_until = None
     now=_now(); acknowledged_at=current.get("acknowledged_at"); acknowledged_by=current.get("acknowledged_by")
     if status=="acknowledged" and current["status"]!="acknowledged": acknowledged_at,acknowledged_by=now,actor
     delta={k:v for k,v in {"status":status,"owner":owner,"escalation":escalation,"suppressed_until":suppressed_until}.items() if v!=current.get(k)}

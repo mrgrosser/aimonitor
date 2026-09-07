@@ -24,6 +24,7 @@ def init_finding_db() -> None:
             risk TEXT NOT NULL, risk_score INTEGER NOT NULL, policy_version TEXT NOT NULL,
             promoted INTEGER NOT NULL DEFAULT 1, evidence_json TEXT NOT NULL)""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_findings_created ON findings(created_at)")
+        db.execute("CREATE TABLE IF NOT EXISTS expired_findings (id TEXT PRIMARY KEY, expired_at TEXT NOT NULL)")
         db.commit()
 
 
@@ -31,6 +32,9 @@ def upsert_finding(item: dict[str, Any], provider: str) -> bool:
     """Store a scored, promoted finding. Returns True when the finding is new."""
     init_finding_db(); user=item.get("user") or {}; now=_now()
     with closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute("BEGIN IMMEDIATE")
+        if db.execute("SELECT 1 FROM expired_findings WHERE id=?", (item.get("id"),)).fetchone():
+            return False
         row=db.execute("SELECT first_seen_at FROM findings WHERE id=?",(item.get("id"),)).fetchone()
         db.execute("""INSERT OR REPLACE INTO findings(id,provider,surface,user_id,user_email,title,created_at,updated_at,
             first_seen_at,last_seen_at,risk,risk_score,policy_version,promoted,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
@@ -65,9 +69,19 @@ def known_versions() -> dict[str, tuple[str, str]]:
     suppressed metadata, so the sync only rehydrates new or changed evidence."""
     init_finding_db(); result: dict[str, tuple[str, str]] = {}
     with closing(sqlite3.connect(DB_PATH)) as db:
-        for id_,updated,version in db.execute("SELECT id,updated_at,policy_version FROM findings"): result[id_]=(updated or "",version)
+        for id_,updated,version,evidence in db.execute("SELECT id,updated_at,policy_version,evidence_json FROM findings"):
+            # Legacy normalized records lacked provider, so their scoped score is stale.
+            if not json.loads(evidence).get("provider"):
+                result[id_] = ("", "")
+                continue
+            result[id_]=(updated or "",version)
         try:
-            for id_,updated,version in db.execute("SELECT evidence_id,updated_at,rule_version FROM suppressed_evidence"): result.setdefault(id_,(updated or "",version))
+            for id_,updated,version,recheck in db.execute("SELECT evidence_id,updated_at,rule_version,recheck_at FROM suppressed_evidence"):
+                if recheck:
+                    due = datetime.fromisoformat(recheck.replace("Z", "+00:00"))
+                    if due.tzinfo is None: due = due.replace(tzinfo=timezone.utc)
+                    if due <= datetime.now(timezone.utc): continue
+                result.setdefault(id_,(updated or "",version))
         except sqlite3.OperationalError: pass
     return result
 
@@ -82,11 +96,20 @@ def touch_seen(ids: list[str]) -> None:
         db.commit()
 
 
+def expired_finding_ids() -> set[str]:
+    """Minimal tombstones prevent provider history from restarting retention."""
+    init_finding_db()
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return {row[0] for row in db.execute("SELECT id FROM expired_findings")}
+
+
 def prune_findings(retention_days: int | None = None) -> int:
     days=RETENTION_DAYS if retention_days is None else retention_days
     if not days: return 0
     init_finding_db(); cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
     with closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT OR IGNORE INTO expired_findings(id,expired_at) SELECT id,? FROM findings WHERE first_seen_at<?", (_now(),cutoff))
         cur=db.execute("DELETE FROM findings WHERE first_seen_at<?",(cutoff,)); db.commit()
     return cur.rowcount
 

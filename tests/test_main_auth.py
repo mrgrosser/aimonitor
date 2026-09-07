@@ -1,10 +1,13 @@
 import asyncio
+import copy
+from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
 import json
 import os
 import sqlite3
+from contextlib import closing
 import subprocess
 import sys
 import tempfile
@@ -133,12 +136,32 @@ class PagePermissionTests(unittest.TestCase):
         self.assertEqual(client.get("/api/audit", cookies=cookies).status_code, 200)
 
 
+    def test_usage_reader_cannot_import_or_replace(self):
+        cookies = self._cookies({"Compliance.UsageReader"})
+        with patch.object(main, "parse_usage_file") as parse, patch.object(main, "save_usage_period") as save:
+            for path in ("/api/usage/import/preview", "/api/usage/import", "/api/usage/import?replace=true"):
+                response = client.post(path, cookies=cookies, files={"file": ("test.csv", b"test", "text/csv")})
+                self.assertEqual(response.status_code, 403)
+            parse.assert_not_called(); save.assert_not_called()
+        self.assertFalse(client.get("/api/auth/me", cookies=cookies).json()["usage_import"])
+
+    def test_authorized_importer_and_admin_can_import(self):
+        with patch.object(main, "USAGE_IMPORT_ROLES", {"Usage.Importer"}):
+            for roles, method in (({"Compliance.Admin"}, "entra"), ({"Compliance.UsageReader", "Usage.Importer"}, "entra"), (set(), "local")):
+                cookies = self._cookies(roles, method)
+                with patch.object(main, "parse_usage_file", return_value=({"period":"Test"}, "hash")), patch.object(main, "save_usage_period") as save, patch.object(main, "generate_usage_alerts"):
+                    response = client.post("/api/usage/import?replace=true", cookies=cookies, files={"file": ("test.csv", b"test", "text/csv")})
+                    self.assertEqual(response.status_code, 200); save.assert_called_once()
+                self.assertTrue(client.get("/api/auth/me", cookies=cookies).json()["usage_import"])
+
+
 class FindingSyncTests(unittest.TestCase):
     def setUp(self):
         client.cookies.clear()
         _repoint_databases()
         connection = sqlite3.connect(DB)
         try:
+            connection.execute("DELETE FROM expired_findings")
             connection.execute("DELETE FROM findings")
             connection.execute("DELETE FROM suppressed_evidence")
             connection.commit()
@@ -185,6 +208,81 @@ class FindingSyncTests(unittest.TestCase):
             response = client.get("/api/cases/claude_chat_stored", cookies=cookies)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["risk"], "high")
+
+
+    def _sync_item(self):
+        return {"id":"claude_chat_retry", "kind":"chat", "surface":"Claude.ai", "title":"Question", "summary":"",
+                "created_at":"2026-09-01T00:00:00Z", "updated_at":"2026-09-01T00:00:00Z", "user":{"id":"u1"}}
+
+    def test_failed_hydration_is_retried_without_suppressing(self):
+        from fastapi import HTTPException
+        import httpx
+        for error in (HTTPException(429, "Rate limited"), HTTPException(503, "Unavailable"), httpx.ReadTimeout("Timeout")):
+            item = self._sync_item(); item["id"] += type(error).__name__ + str(getattr(error,"status_code",0))
+            fetch = AsyncMock(side_effect=[error, {"messages":[{"text":"hack production"}]}])
+            with patch.object(main,"_live_index",AsyncMock(side_effect=lambda:([copy.deepcopy(item)],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"anthropic_get",fetch):
+                first=asyncio.run(main.sync_provider_findings())
+                self.assertEqual(first["scored"],0); self.assertNotIn(item["id"],finding_store.known_versions())
+                second=asyncio.run(main.sync_provider_findings())
+                self.assertEqual(second["promoted"],1); self.assertEqual(fetch.await_count,2)
+
+    def test_failed_refresh_preserves_existing_evidence(self):
+        from fastapi import HTTPException
+        item=self._sync_item(); item["messages"]=[{"text":"hack production"}]
+        governance.score_evidence(item); finding_store.upsert_finding(item,"anthropic")
+        changed={**item,"updated_at":"2026-09-02T00:00:00Z"}
+        with patch.object(main,"_live_index",AsyncMock(return_value=([changed],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"anthropic_get",AsyncMock(side_effect=HTTPException(500,"Unavailable"))):
+            asyncio.run(main.sync_provider_findings())
+        self.assertEqual(finding_store.get_finding(item["id"]),item)
+
+    def test_expired_exception_reevaluates_unchanged_evidence(self):
+        item=self._sync_item(); item["title"]="hack production"
+        policy=copy.deepcopy(main.active_policy())
+        policy["exceptions"]=[{"id":"pilot","type":"user","value":"u1","expires_at":"2099-01-01T00:00:00Z"}]
+        with patch.object(policy_management,"active_policy",return_value=policy), patch.object(main,"active_policy",return_value=policy), patch.object(main,"_live_index",AsyncMock(side_effect=lambda:([copy.deepcopy(item)],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"hydrate_live",AsyncMock(side_effect=lambda rows:rows)):
+            self.assertEqual(asyncio.run(main.sync_provider_findings())["suppressed"],1)
+            self.assertEqual(asyncio.run(main.sync_provider_findings())["scored"],0)
+            # Advance the clock past the exception in both scoring and synchronization.
+            class Future(datetime):
+                @classmethod
+                def now(cls, tz=None): return datetime(2100,1,1,tzinfo=timezone.utc)
+            with patch.object(governance,"datetime",Future), patch.object(finding_store,"datetime",Future):
+                self.assertEqual(asyncio.run(main.sync_provider_findings())["promoted"],1)
+
+    def test_retention_blocks_reimport_after_policy_or_provider_change(self):
+        item=self._sync_item(); item["title"]="hack production"
+        governance.score_evidence(item); finding_store.upsert_finding(item,"anthropic")
+        with closing(sqlite3.connect(DB)) as db, db:
+            db.execute("UPDATE findings SET first_seen_at=?",((datetime.now(timezone.utc)-timedelta(days=200)).isoformat(),))
+        item["updated_at"]="2026-09-03T00:00:00Z"
+        with patch.object(main,"_live_index",AsyncMock(return_value=([item],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"hydrate_live",AsyncMock(return_value=[])) as hydrate, patch.object(finding_store,"RETENTION_DAYS",180):
+            self.assertEqual(asyncio.run(main.sync_provider_findings())["pruned"],1)
+            with patch.object(main,"active_policy",return_value={"version":"new-policy"}):
+                self.assertEqual(asyncio.run(main.sync_provider_findings())["scored"],0)
+            self.assertTrue(all(call.args[0]==[] for call in hydrate.call_args_list))
+        self.assertIsNone(finding_store.get_finding(item["id"]))
+
+    def test_live_normalization_applies_provider_scope(self):
+        policy=copy.deepcopy(main.active_policy())
+        policy["scope_overrides"]=[{"id":"claude","provider":"anthropic","finding_threshold":100}]
+        with patch.object(main,"_fetch_all",AsyncMock(side_effect=[[{"id":"chat","title":"hack production"}],[],[]])), patch.object(policy_management,"active_policy",return_value=policy):
+            chats,_,_=asyncio.run(main._live_index())
+            scored=governance.score_evidence(chats[0])
+        self.assertEqual(scored["provider"],"anthropic"); self.assertEqual(scored["risk_threshold"],100)
+        self.assertEqual(scored["risk_scope_ids"],["claude"]); self.assertFalse(scored["promoted"])
+
+    def test_copilot_pairs_messages_across_pages(self):
+        pages=[{"value":[{"id":"p","requestId":"req","interactionType":"userPrompt","createdDateTime":"2026-09-01T00:00:00Z","body":{"content":"hack production"}}],"@odata.nextLink":"https://graph.microsoft.com/next"},
+               {"value":[{"id":"r","requestId":"req","interactionType":"aiResponse","createdDateTime":"2026-09-01T00:01:00Z","body":{"content":"No"}}]}]
+        with patch.object(main,"m365_users",AsyncMock(return_value=[{"id":"u","email":"u@example.com"}])), patch.object(main,"graph_get",AsyncMock(side_effect=pages)) as fetch:
+            rows=asyncio.run(main.m365_cases())
+        self.assertEqual(fetch.await_count,2); self.assertEqual(fetch.call_args.args[0],"https://graph.microsoft.com/next")
+        self.assertEqual(len(rows),1); self.assertEqual(len(rows[0]["messages"]),2); self.assertEqual(rows[0]["provider"],"m365")
+
+    def test_copilot_partial_page_failure_does_not_store_partial_evidence(self):
+        from fastapi import HTTPException
+        with patch.object(main,"m365_users",AsyncMock(return_value=[{"id":"u"}])), patch.object(main,"graph_get",AsyncMock(side_effect=[{"value":[{"id":"p"}],"@odata.nextLink":"https://graph.microsoft.com/next"},HTTPException(503,"Unavailable")])):
+            with self.assertRaises(HTTPException): asyncio.run(main.m365_cases())
 
 
 class LiveModeGuardTests(unittest.TestCase):

@@ -82,4 +82,25 @@ class AlertManagementTests(unittest.TestCase):
         deliver.assert_not_called(); self.assertEqual(result,{"delivered":0,"retrying":0,"failed":0})
         self.assertEqual(alerts.list_deliveries(alert["id"])[0]["status"],"processing")
 
+
+    def test_suppression_rejects_invalid_naive_and_past_dates(self):
+        alert=alerts.create_alert("dates","policy","high","Review","Summary")
+        for value in ("not-a-date","2099-01-01T00:00:00","2000-01-01T00:00:00Z"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                alerts.update_alert(alert["id"],{"status":"suppressed","suppressed_until":value},"analyst","Pilot")
+
+    def test_expiration_reopens_once_with_timeline_and_keeps_future_suppression(self):
+        expired=alerts.create_alert("expired","policy","high","Review","Summary")
+        future=alerts.create_alert("future","policy","high","Review","Summary")
+        for item in (expired,future):
+            alerts.update_alert(item["id"],{"status":"suppressed","suppressed_until":"2099-01-01T00:00:00Z"},"analyst","Pilot")
+        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+            db.execute("UPDATE alerts SET suppressed_until=? WHERE id=?",("2000-01-01T00:00:00-06:00",expired["id"])); db.commit()
+        self.assertEqual([x["id"] for x in alerts.list_alerts(status="open")],[expired["id"]])
+        self.assertEqual(alerts.expire_suppressions(),0)
+        self.assertEqual(alerts.get_alert(future["id"])["status"],"suppressed")
+        timeline=alerts.alert_timeline(expired["id"])
+        self.assertEqual(len([x for x in timeline if x["action"]=="suppression_expired"]),1)
+        self.assertIsNone(alerts.get_alert(expired["id"])["suppressed_until"])
+
 if __name__=="__main__": unittest.main()

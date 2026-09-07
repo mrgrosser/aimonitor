@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -59,6 +60,9 @@ class FindingStoreTests(unittest.TestCase):
         self.assertEqual(finding_store.prune_findings(0), 0)
         self.assertEqual(finding_store.prune_findings(180), 1)
         self.assertEqual(finding_store.list_findings(), [])
+        self.assertIn(self.item["id"], finding_store.expired_finding_ids())
+        self.assertFalse(finding_store.upsert_finding(self.item, "anthropic"))
+        self.assertIsNone(finding_store.get_finding(self.item["id"]))
 
     def test_rescore_moves_below_threshold_findings_to_suppressed(self):
         governance.score_evidence(self.item)
@@ -79,6 +83,32 @@ class FindingStoreTests(unittest.TestCase):
         result = finding_store.rescore_findings()
         self.assertEqual(result, {"rescored": 1, "suppressed": 0})
         self.assertEqual(len(finding_store.list_findings()), 1)
+
+
+    def test_legacy_provider_scores_are_rechecked(self):
+        governance.score_evidence(self.item)
+        self.item.pop("provider")
+        finding_store.upsert_finding(self.item,"anthropic")
+        self.assertEqual(finding_store.known_versions()[self.item["id"]], ("", ""))
+        governance.score_evidence(self.item)
+        finding_store.upsert_finding(self.item,"anthropic")
+        self.assertIn(self.item["id"], finding_store.known_versions())
+
+    def test_legacy_suppression_migration_invalidates_decisions_once(self):
+        with closing(sqlite3.connect(finding_store.DB_PATH)) as db, db:
+            db.execute("DROP TABLE suppressed_evidence")
+            db.execute("""CREATE TABLE suppressed_evidence (
+                evidence_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL, provider TEXT,
+                user_id TEXT, surface TEXT, risk_score INTEGER NOT NULL,
+                reason TEXT NOT NULL, rule_version TEXT NOT NULL, updated_at TEXT)""")
+            db.execute("INSERT INTO suppressed_evidence VALUES(?,?,?,?,?,?,?,?,?)",
+                       ("legacy","2026-09-01","anthropic","u","Claude.ai",80,"below_finding_threshold","old-policy","timestamp"))
+        governance.init_db()
+        self.assertEqual(finding_store.known_versions()["legacy"],("timestamp",""))
+        with closing(sqlite3.connect(finding_store.DB_PATH)) as db, db:
+            db.execute("UPDATE suppressed_evidence SET rule_version='rescored'")
+        governance.init_db()
+        self.assertEqual(finding_store.known_versions()["legacy"],("timestamp","rescored"))
 
 
 if __name__ == "__main__":

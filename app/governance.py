@@ -40,6 +40,10 @@ def init_db() -> None:
             reason TEXT NOT NULL, rule_version TEXT NOT NULL)""")
         columns={row[1] for row in db.execute("PRAGMA table_info(suppressed_evidence)").fetchall()}
         if "updated_at" not in columns: db.execute("ALTER TABLE suppressed_evidence ADD COLUMN updated_at TEXT")
+        if "recheck_at" not in columns:
+            db.execute("ALTER TABLE suppressed_evidence ADD COLUMN recheck_at TEXT")
+            # Legacy decisions have no expiry metadata; reevaluate them once.
+            db.execute("UPDATE suppressed_evidence SET rule_version=''")
         db.commit()
 
 def audit(actor: str, action: str, object_type: str = "", object_id: str = "",
@@ -84,6 +88,8 @@ def verify_chain() -> bool:
 def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
     from app.policy_management import active_policy
     policy=active_policy(); rules=policy["rules"]; bands=policy["severity_bands"]
+    # Also normalize retained evidence written before provider metadata was introduced.
+    item["provider"] = item.get("provider") or ("m365" if item.get("kind") == "copilot" else "anthropic")
     parts=[item.get("title",""),item.get("summary","")]
     for msg in item.get("messages",[]) or []: parts.append(str(msg.get("text") or msg.get("content") or ""))
     for ctx in item.get("contexts",[]) or []: parts.extend((str(ctx.get("displayName","")),str(ctx.get("contextType",""))))
@@ -121,14 +127,15 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
     score=min(score,100); severity="critical" if score>=bands["critical"] else "high" if score>=bands["high"] else "medium" if score>=bands["medium"] else "low" if score>=bands["low"] else "informational"
     item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
         risk_scope_ids=[scope["id"] for scope in matching],policy_exception_id=exception.get("id") if exception else None,
+        risk_recheck_at=exception.get("expires_at") if exception else None,
         promoted=score>=threshold and exception is None)
     return item
 
 def record_suppressed(item: dict[str,Any], provider: str) -> None:
-    init_db(); user=item.get("user") or {}; reason="below_finding_threshold"
+    init_db(); user=item.get("user") or {}; reason="policy_exception" if item.get("policy_exception_id") else "below_finding_threshold"
     with closing(sqlite3.connect(DB_PATH)) as db:
-        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown"),item.get("updated_at")))
+        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version,updated_at,recheck_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown"),item.get("updated_at"),item.get("risk_recheck_at")))
         db.commit()
 
 def suppressed_count() -> int:

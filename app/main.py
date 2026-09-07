@@ -25,9 +25,9 @@ from app.usage_reporting import get_usage_period, init_usage_db, list_usage_peri
 from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule, filter_findings, findings_csv, findings_pdf, findings_summary, findings_trends, init_reporting_db, list_schedules, send_report, smtp_configured, update_schedule_run
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
-from app.alert_management import alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
+from app.alert_management import expire_suppressions, alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
 from app.governance_analytics import correlate_findings, usage_alerts
-from app.finding_store import delete_finding, get_finding, init_finding_db, known_versions, list_findings, prune_findings, rescore_findings, touch_seen, upsert_finding
+from app.finding_store import expired_finding_ids, delete_finding, get_finding, init_finding_db, known_versions, list_findings, prune_findings, rescore_findings, touch_seen, upsert_finding
 from app.rapid7_export import get_config as rapid7_config, health as rapid7_health, init_rapid7_db, preview_event as rapid7_preview, process_outbox as process_rapid7, send_test as rapid7_send_test, update_config as rapid7_update_config
 
 ROOT = Path(__file__).parent
@@ -80,6 +80,7 @@ PAGE_ROLE_DEFAULTS = {
     "settings":{"Compliance.Admin"},
 }
 PAGE_ROLES = {page:{x.strip() for x in os.getenv(f"PAGE_{page.upper()}_ROLES",",".join(sorted(defaults))).split(",") if x.strip()} for page,defaults in PAGE_ROLE_DEFAULTS.items()}
+USAGE_IMPORT_ROLES = {x.strip() for x in os.getenv("USAGE_IMPORT_ROLES","Compliance.Admin").split(",") if x.strip()}
 USAGE_USER_ROLES = {x.strip() for x in os.getenv("USAGE_USER_DETAIL_ROLES","Compliance.Admin,Compliance.UsageReader").split(",") if x.strip()}
 _graph_token: dict[str, Any] = {}
 _m365_evidence: dict[str, dict[str, Any]] = {}
@@ -104,6 +105,7 @@ async def start_alert_worker():
         while True:
             await asyncio.sleep(max(5,int(os.getenv("ALERT_DELIVERY_INTERVAL_SECONDS","30"))))
             try:
+                await asyncio.to_thread(expire_suppressions)
                 await asyncio.to_thread(process_deliveries)
                 await asyncio.to_thread(process_rapid7)
             except Exception as exc: audit("system","alert_delivery_worker_error","alert_delivery",details={"error":str(exc)[:500]})
@@ -280,7 +282,15 @@ async def m365_cases() -> list[dict[str,Any]]:
     async def fetch(u):
         async with sem:
             url=f"/copilot/users/{u['id']}/interactionHistory/getAllEnterpriseInteractions?$top=100"
-            try: return u,(await graph_get(url)).get("value",[])
+            interactions = []; seen = set()
+            try:
+                while url:
+                    if url in seen: raise HTTPException(502, "Microsoft Graph returned a repeated pagination link")
+                    seen.add(url)
+                    page = await graph_get(url)
+                    interactions.extend(page.get("value", []))
+                    url = page.get("@odata.nextLink")
+                return u, interactions
             except HTTPException as exc:
                 if exc.status_code in (400,403,404): return u,[]
                 raise
@@ -297,7 +307,7 @@ async def m365_cases() -> list[dict[str,Any]]:
             cid=f"m365:{u['id']}:{request_id}"; contexts=[]
             for x in items:
                 contexts.extend(x.get("contexts") or [])
-            case={"id":cid,"kind":"copilot","risk":"unreviewed","status":"new","created_at":items[0].get("createdDateTime"),"updated_at":items[-1].get("createdDateTime"),
+            case={"id":cid,"kind":"copilot","provider":"m365","risk":"unreviewed","status":"new","created_at":items[0].get("createdDateTime"),"updated_at":items[-1].get("createdDateTime"),
                 "user":u,"surface":m365_surface(prompt.get("appClass","")),"title":body[:90],"summary":"Microsoft 365 Copilot prompt/response evidence available for review.","matched":[],"contexts":contexts,
                 "messages":[{"role":"human" if x.get("interactionType")=="userPrompt" else "assistant","created_at":x.get("createdDateTime"),"text":(x.get("body") or {}).get("content") or "","request_id":x.get("requestId")} for x in items]}
             _m365_evidence[cid]=case; cases.append(case)
@@ -436,7 +446,7 @@ async def entra_callback(request: Request):
 @app.get("/api/auth/me")
 def me(request: Request, user: str = Depends(current_user)):
     identity=current_identity(request)
-    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"pages":allowed_pages(identity),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"usage_user_detail":identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
+    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"pages":allowed_pages(identity),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"usage_import":can_import_usage(identity),"usage_user_detail":identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
 
 def can_view_named_users(request: Request) -> bool:
     identity=current_identity(request)
@@ -478,13 +488,15 @@ async def collect_findings() -> list[dict[str, Any]]:
     return promoted
 
 async def sync_provider_findings() -> dict[str, int]:
+    pruned = await asyncio.to_thread(prune_findings)
+    expired = await asyncio.to_thread(expired_finding_ids)
     chats,local,remote=await _live_index(); index=chats+local+remote
     if M365_ENABLED: index+=await m365_cases()
     known=await asyncio.to_thread(known_versions); version=active_policy()["version"]
-    changed=[x for x in index if str(x.get("id")) not in known or known[str(x.get("id"))]!=((x.get("updated_at") or ""),version)]
+    changed=[x for x in index if str(x.get("id")) not in expired and (str(x.get("id")) not in known or known[str(x.get("id"))]!=((x.get("updated_at") or ""),version))]
     hydrated=await hydrate_live([x for x in changed if x.get("kind")!="copilot"])+[x for x in changed if x.get("kind")=="copilot"]
     connectors=[item["id"] for item in connector_health() if item["configured"]]
-    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":0}
+    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":pruned}
     for row in hydrated:
         score_evidence(row); counts["scored"]+=1; provider="m365" if row.get("kind")=="copilot" else "anthropic"
         if row["promoted"]:
@@ -493,7 +505,6 @@ async def sync_provider_findings() -> dict[str, int]:
             record_suppressed(row,provider); await asyncio.to_thread(delete_finding,str(row.get("id"))); counts["suppressed"]+=1
     await asyncio.to_thread(touch_seen,[str(x.get("id")) for x in index])
     materialize_alerts(correlate_findings(await asyncio.to_thread(list_findings)),connectors)
-    counts["pruned"]=await asyncio.to_thread(prune_findings)
     return counts
 
 @app.on_event("startup")
@@ -540,9 +551,12 @@ async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
                 else: data=await anthropic_get(f"/v1/compliance/apps/sessions/local/{item['id']}/messages")
                 raw=data.get("chat_messages") or data.get("messages") or data.get("data") or []
                 item["messages"]=[{"role":m.get("role") or m.get("sender") or m.get("type"),"created_at":m.get("created_at"),"text":m.get("text") or m.get("content") or ""} for m in raw]
-            except HTTPException: item["messages"]=[]
+            except (HTTPException, httpx.RequestError) as exc:
+                audit("system", "finding_hydration_failed", "evidence", str(item.get("id") or ""),
+                      details={"error_type":type(exc).__name__, "status":getattr(exc, "status_code", None)})
+                return None
             return item
-    return await asyncio.gather(*(one(x) for x in rows))
+    return [item for item in await asyncio.gather(*(one(x) for x in rows)) if item is not None]
 
 FINDINGS_SYNC_MAX_ITEMS = max(100, min(int(os.getenv("FINDINGS_SYNC_MAX_ITEMS", "2000")), 50000))
 
@@ -566,7 +580,7 @@ async def _live_index():
     remote_raw = await _fetch_all("/v1/compliance/apps/sessions/remote")
     def norm(x, kind, surface):
         u=x.get("user") or {}; email=u.get("email_address") or x.get("user_email") or "Unknown user"
-        return {"id":x.get("id"),"kind":kind,"risk":"unreviewed","status":"new","created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"user":{"id":u.get("id") or x.get("user_id"),"email":email},"surface":surface,"title":x.get("name") or x.get("title") or f"{surface} evidence","summary":"Content available for authorized review.","matched":[]}
+        return {"id":x.get("id"),"kind":kind,"provider":"anthropic","risk":"unreviewed","status":"new","created_at":x.get("created_at"),"updated_at":x.get("updated_at"),"user":{"id":u.get("id") or x.get("user_id"),"email":email},"surface":surface,"title":x.get("name") or x.get("title") or f"{surface} evidence","summary":"Content available for authorized review.","matched":[]}
     return ([norm(x,"chat","Claude.ai") for x in chats_raw],[norm(x,"session","Claude Code / Cowork") for x in local_raw],[norm(x,"session","Cowork") for x in remote_raw])
 
 @app.get("/api/cases/{case_id}")
@@ -881,6 +895,17 @@ def resolve_usage(period: str = "") -> dict[str, Any]:
         "licensing":{},"claude_products":[],"claude_models":[],"copilot_apps":[],"top_users":[],
         "caveats":["Import monthly XLSX/CSV analytics or configure a live connector to populate this view."]}
 
+def can_import_usage(identity: dict[str, Any]) -> bool:
+    return identity["method"] == "local" or "Compliance.Admin" in identity["roles"] or bool(identity["roles"] & USAGE_IMPORT_ROLES)
+
+
+def usage_importer(request: Request) -> str:
+    identity = require_page(request, "usage")
+    if not can_import_usage(identity):
+        raise HTTPException(403, "Usage imports require an approved import role")
+    return identity["user"]
+
+
 def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]:
     identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
     return {**data,"user_detail_included":named,"top_users":[{**row,
@@ -905,7 +930,7 @@ def usage_periods(request: Request, user: str = Depends(current_user)):
     return {"data":periods}
 
 @app.post("/api/usage/import/preview")
-async def usage_import_preview(request: Request, file: UploadFile = File(...), user: str = Depends(current_user)):
+async def usage_import_preview(request: Request, file: UploadFile = File(...), user: str = Depends(usage_importer)):
     content=await file.read()
     try: data,digest=parse_usage_file(content,file.filename or "usage.xlsx")
     except ValueError as exc: raise HTTPException(400,str(exc))
@@ -914,7 +939,7 @@ async def usage_import_preview(request: Request, file: UploadFile = File(...), u
     return {"data":usage_for_identity(data,request),"source_hash":digest,"filename":file.filename}
 
 @app.post("/api/usage/import")
-async def usage_import(request: Request, file: UploadFile = File(...), replace: bool = False, user: str = Depends(current_user)):
+async def usage_import(request: Request, file: UploadFile = File(...), replace: bool = False, user: str = Depends(usage_importer)):
     content=await file.read()
     try:
         data,digest=parse_usage_file(content,file.filename or "usage.xlsx")
