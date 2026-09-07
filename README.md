@@ -2,6 +2,8 @@
 
 A Dockerized, read-only evidence explorer for Anthropic's Claude Compliance API. It gives security, legal, and compliance teams a searchable view of Claude.ai chats, Claude Code/Cowork sessions, and activity records, with a verbatim JSON evidence export.
 
+See [LAUNCH.md](LAUNCH.md) for the 0.9.7 deployment checks and remaining environment validation.
+
 See [ROADMAP.md](ROADMAP.md) for delivered capabilities, planned milestones, and the Security and Compliance approval gates required before production use.
 
 See [SCORING.md](SCORING.md) for the current deterministic scoring formula, a worked threat example, and the proposed hybrid rules-plus-model architecture.
@@ -24,7 +26,13 @@ git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.6`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.9.7`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+
+Version 0.9.7 adds an explicit System / Light / Dark appearance selector on both sign-in and the sidebar. System follows operating-system changes; the selected preference survives reloads.
+
+Live startup requires `DEMO_MODE=false`, `COOKIE_SECURE=true`, a strong session secret, non-default local credentials (if enabled), and at least one configured provider. A missing key never switches a live deployment to demonstration data. Configure both Claude and Microsoft 365 for combined coverage. The Evidence sidebar reports sync pending, failed, incomplete, or last sync succeeded; HTTP `/health` is a liveness check, not proof of provider access.
+
+Claude chat and session lists/transcripts use their respective pagination schemes. `FINDINGS_SYNC_MAX_ITEMS=0` walks all pages; a nonzero limit rejects an oversized walk instead of accepting truncated evidence. Existing installations using 2000 should review that setting before launch. The first sync after upgrading reevaluates legacy findings and suppression decisions once so the corrected transcript ingestion takes effect. Evidence detail/export routes serve retained findings only; they cannot refetch expired or suppressed records.
 
 ## Connect Anthropic
 
@@ -42,7 +50,7 @@ An Admin API key can only read the Activity Feed. Full chat, file, project, dire
 - Search and filtering, transcript drill-down, Activity Feed and organizations backend endpoints
 - Downloadable JSON evidence envelope with source, exporter, and timestamp
 - Responsive UI, health check, Docker Compose, persistent volume
-- Safe demo mode with 100 realistic, threshold-qualified leadership-demo findings when no Anthropic key is present
+- Safe demo mode with 100 realistic, threshold-qualified leadership-demo findings when `DEMO_MODE=true`
 - Microsoft 365 Copilot Chat and Copilot-in-Office prompt/response ingestion through Microsoft Graph
 - Leadership-ready Usage & Spend dashboard for adoption, licensing, budgets, products, applications, models, and anonymized utilization
 - Server-enforced page permissions mapped to Entra application roles, including a Reports-only experience
@@ -82,7 +90,7 @@ The reporting toolbar generates audited PDF, CSV, JSON, and printable HTML repor
 
 The **Reports** page provides custom date, severity, and surface filters; risk/category/provenance summaries; month-over-month finding and usage trends; and PDF, CSV, and JSON findings exports. Every view and export records its actor, filters, report version, and result count in the audit chain.
 
-Named identities are excluded by default. Set `NAMED_USER_REPORT_ROLES` to the approved Entra application roles allowed to include them; local admin retains access for evaluation and emergency use. Scheduled daily, weekly, or monthly report definitions are stored in the persistent database. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional SMTP credentials to enable delivery. Without SMTP, schedules remain visible and report the delivery configuration state rather than silently failing.
+Named identities, raw conversation titles, and provider IDs containing user identifiers are excluded from restricted reports by default. Set `NAMED_USER_REPORT_ROLES` to the approved Entra application roles allowed to include them; local admin retains access for evaluation and emergency use. Scheduled daily, weekly, or monthly report definitions are stored in the persistent database. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and optional SMTP credentials to enable delivery. Without SMTP, schedules remain visible and report the delivery configuration state rather than silently failing.
 
 ## Investigation cases
 

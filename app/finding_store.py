@@ -5,7 +5,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.governance import DB_PATH
+from app.governance import DB_PATH, PIPELINE_VERSION
 
 # Promoted evidence is retained for this many days; 0 disables pruning. Case snapshots and
 # legal holds live in their own tables and are never touched by pruning.
@@ -71,12 +71,16 @@ def known_versions() -> dict[str, tuple[str, str]]:
     with closing(sqlite3.connect(DB_PATH)) as db:
         for id_,updated,version,evidence in db.execute("SELECT id,updated_at,policy_version,evidence_json FROM findings"):
             # Legacy normalized records lacked provider, so their scoped score is stale.
-            if not json.loads(evidence).get("provider"):
+            if not json.loads(evidence).get("provider") or json.loads(evidence).get("risk_pipeline_version") != PIPELINE_VERSION:
+                result[id_] = ("", "")
+                continue
+            if any(not isinstance(message.get("text", ""), str) for message in json.loads(evidence).get("messages", [])):
                 result[id_] = ("", "")
                 continue
             result[id_]=(updated or "",version)
         try:
-            for id_,updated,version,recheck in db.execute("SELECT evidence_id,updated_at,rule_version,recheck_at FROM suppressed_evidence"):
+            for id_,updated,version,recheck,pipeline in db.execute("SELECT evidence_id,updated_at,rule_version,recheck_at,pipeline_version FROM suppressed_evidence"):
+                if pipeline != PIPELINE_VERSION: version = ""
                 if recheck:
                     due = datetime.fromisoformat(recheck.replace("Z", "+00:00"))
                     if due.tzinfo is None: due = due.replace(tzinfo=timezone.utc)

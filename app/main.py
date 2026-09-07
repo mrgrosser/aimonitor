@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from authlib.integrations.starlette_client import OAuth, OAuthError
@@ -36,8 +36,8 @@ PASSWORD = os.getenv("APP_PASSWORD", "change-me-now")
 SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode()
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
-DEMO = os.getenv("DEMO_MODE", "true").lower() == "true" or not API_KEY
-APP_VERSION = os.getenv("APP_VERSION", "0.9.6")
+DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
+APP_VERSION = os.getenv("APP_VERSION", "0.9.7")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -51,9 +51,13 @@ def _refuse_insecure_live_config() -> None:
         problems.append("SESSION_SECRET must be a unique random value of at least 32 characters")
     if LOCAL_AUTH and PASSWORD in ("", "change-me-now"):
         problems.append("APP_PASSWORD is empty or the published default while local login is enabled")
+    if not COOKIE_SECURE: problems.append("COOKIE_SECURE must be true for live HTTPS deployments")
+    if not API_KEY and not M365_ENABLED: problems.append("Configure at least one live evidence provider")
+    if not LOCAL_AUTH and not ENTRA_ENABLED: problems.append("Configure Entra before disabling local authentication")
+    if any((M365_TENANT, M365_CLIENT, M365_SECRET)) and not M365_ENABLED:
+        problems.append("Microsoft 365 Copilot configuration is incomplete")
     if problems:
         raise RuntimeError("Refusing to start in live mode: " + "; ".join(problems))
-_refuse_insecure_live_config()
 ENTRA_TENANT = os.getenv("ENTRA_TENANT_ID", "").strip()
 ENTRA_CLIENT = os.getenv("ENTRA_CLIENT_ID", "").strip()
 ENTRA_SECRET = os.getenv("ENTRA_CLIENT_SECRET", "").strip()
@@ -67,6 +71,7 @@ M365_SECRET = os.getenv("M365_COPILOT_CLIENT_SECRET", "").strip()
 M365_USERS = [x.strip() for x in os.getenv("M365_COPILOT_USER_IDS", "").split(",") if x.strip()]
 M365_MAX_USERS = max(1, min(int(os.getenv("M365_COPILOT_MAX_USERS", "100")), 999))
 M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
+_refuse_insecure_live_config()
 CASE_READ_ROLES = {x.strip() for x in os.getenv("CASE_READ_ROLES","Compliance.Admin,Compliance.Investigator,Compliance.Reviewer,Compliance.Auditor").split(",") if x.strip()}
 CASE_WRITE_ROLES = {x.strip() for x in os.getenv("CASE_WRITE_ROLES","Compliance.Admin,Compliance.Investigator").split(",") if x.strip()}
 PAGE_ROLE_DEFAULTS = {
@@ -83,7 +88,6 @@ PAGE_ROLES = {page:{x.strip() for x in os.getenv(f"PAGE_{page.upper()}_ROLES",",
 USAGE_IMPORT_ROLES = {x.strip() for x in os.getenv("USAGE_IMPORT_ROLES","Compliance.Admin").split(",") if x.strip()}
 USAGE_USER_ROLES = {x.strip() for x in os.getenv("USAGE_USER_DETAIL_ROLES","Compliance.Admin,Compliance.UsageReader").split(",") if x.strip()}
 _graph_token: dict[str, Any] = {}
-_m365_evidence: dict[str, dict[str, Any]] = {}
 
 app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
@@ -118,7 +122,7 @@ async def stop_alert_worker():
 @app.middleware("http")
 async def prevent_stale_frontend(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path == "/" or request.url.path.startswith("/static/"):
+    if request.url.path == "/" or request.url.path.startswith(("/static/", "/api/")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
@@ -261,6 +265,12 @@ async def graph_token() -> str:
     return data["access_token"]
 
 async def graph_get(url: str) -> dict[str, Any]:
+    if not url.startswith("/"):
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != "graph.microsoft.com" or parsed.port not in (None,443) or parsed.username:
+            raise HTTPException(502, "Microsoft Graph returned an invalid pagination URL")
+    elif url.startswith("//"):
+        raise HTTPException(502, "Microsoft Graph returned an invalid pagination URL")
     token=await graph_token()
     async with httpx.AsyncClient(timeout=45) as client:
         res=await client.get(url if url.startswith("https://") else f"https://graph.microsoft.com/v1.0{url}", headers={"Authorization":f"Bearer {token}"})
@@ -269,8 +279,11 @@ async def graph_get(url: str) -> dict[str, Any]:
 
 async def m365_users() -> list[dict[str,str]]:
     if M365_USERS: return [{"id":x,"email":x} for x in M365_USERS[:M365_MAX_USERS]]
-    data=await graph_get(f"/users?$select=id,displayName,mail,userPrincipalName&$top={M365_MAX_USERS}")
-    return [{"id":x["id"],"email":x.get("mail") or x.get("userPrincipalName") or x["id"]} for x in data.get("value",[])[:M365_MAX_USERS]]
+    users=[]; seen=set(); url=f"/users?$select=id,displayName,mail,userPrincipalName&$top={M365_MAX_USERS}"
+    while url and len(users)<M365_MAX_USERS:
+        if url in seen: raise HTTPException(502, "Microsoft Graph user pagination did not advance")
+        seen.add(url); data=await graph_get(url); users.extend(data.get("value",[])); url=data.get("@odata.nextLink")
+    return [{"id":x["id"],"email":x.get("mail") or x.get("userPrincipalName") or x["id"]} for x in users[:M365_MAX_USERS]]
 
 def m365_surface(app_class: str) -> str:
     leaf=(app_class or "").split(".")[-1]
@@ -291,8 +304,7 @@ async def m365_cases() -> list[dict[str,Any]]:
                     interactions.extend(page.get("value", []))
                     url = page.get("@odata.nextLink")
                 return u, interactions
-            except HTTPException as exc:
-                if exc.status_code in (400,403,404): return u,[]
+            except HTTPException:
                 raise
     results=await asyncio.gather(*(fetch(u) for u in users))
     cases=[]
@@ -310,7 +322,7 @@ async def m365_cases() -> list[dict[str,Any]]:
             case={"id":cid,"kind":"copilot","provider":"m365","risk":"unreviewed","status":"new","created_at":items[0].get("createdDateTime"),"updated_at":items[-1].get("createdDateTime"),
                 "user":u,"surface":m365_surface(prompt.get("appClass","")),"title":body[:90],"summary":"Microsoft 365 Copilot prompt/response evidence available for review.","matched":[],"contexts":contexts,
                 "messages":[{"role":"human" if x.get("interactionType")=="userPrompt" else "assistant","created_at":x.get("createdDateTime"),"text":(x.get("body") or {}).get("content") or "","request_id":x.get("requestId")} for x in items]}
-            _m365_evidence[cid]=case; cases.append(case)
+            cases.append(case)
     return cases
 
 def make_token(username: str, roles: set[str] | None = None, method: str = "local") -> str:
@@ -357,16 +369,16 @@ async def enforce_page_permissions(request: Request, call_next):
         try:
             require_page(request,route_page)
         except HTTPException as exc:
-            return JSONResponse({"detail":exc.detail},status_code=exc.status_code)
+            return JSONResponse({"detail":exc.detail},status_code=exc.status_code,headers={"Cache-Control":"no-store"})
     return await call_next(request)
 
 async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     if DEMO: return {"data": []}
+    if not API_KEY: raise HTTPException(503, "Claude Compliance API is not configured")
     async with httpx.AsyncClient(timeout=30) as client:
         res = await client.get(f"{BASE_URL}{path}", params=params, headers={"x-api-key": API_KEY})
     if res.status_code >= 400:
-        detail = res.json().get("error", {}).get("message", res.text)
-        raise HTTPException(res.status_code, detail)
+        raise HTTPException(res.status_code, f"Claude Compliance API returned HTTP {res.status_code}")
     return res.json()
 
 @app.get("/health")
@@ -487,16 +499,33 @@ async def collect_findings() -> list[dict[str, Any]]:
     materialize_alerts(correlate_findings(promoted),[])
     return promoted
 
+_finding_sync_status: dict[str, Any] = {"state":"not_started", "last_attempt_at":None, "last_success_at":None, "error":None}
+
+
 async def sync_provider_findings() -> dict[str, int]:
+    _finding_sync_status.update(state="running", last_attempt_at=datetime.now(timezone.utc).isoformat(), error=None)
+    try:
+        result = await _sync_provider_findings()
+    except Exception as exc:
+        _finding_sync_status.update(state="failed", error=f"Provider sync failed ({getattr(exc, 'status_code', type(exc).__name__)}). Check access audit.")
+        raise
+    if result.get("failed", 0):
+        _finding_sync_status.update(state="partial", error=f"{result['failed']} transcript(s) could not be read; they will be retried.")
+    else:
+        _finding_sync_status.update(state="ok", last_success_at=datetime.now(timezone.utc).isoformat())
+    return result
+
+
+async def _sync_provider_findings() -> dict[str, int]:
     pruned = await asyncio.to_thread(prune_findings)
     expired = await asyncio.to_thread(expired_finding_ids)
-    chats,local,remote=await _live_index(); index=chats+local+remote
+    chats,local,remote=await _live_index() if API_KEY else ([],[],[]); index=chats+local+remote
     if M365_ENABLED: index+=await m365_cases()
     known=await asyncio.to_thread(known_versions); version=active_policy()["version"]
     changed=[x for x in index if str(x.get("id")) not in expired and (str(x.get("id")) not in known or known[str(x.get("id"))]!=((x.get("updated_at") or ""),version))]
     hydrated=await hydrate_live([x for x in changed if x.get("kind")!="copilot"])+[x for x in changed if x.get("kind")=="copilot"]
     connectors=[item["id"] for item in connector_health() if item["configured"]]
-    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":pruned}
+    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":pruned,"failed":len(changed)-len(hydrated)}
     for row in hydrated:
         score_evidence(row); counts["scored"]+=1; provider="m365" if row.get("kind")=="copilot" else "anthropic"
         if row["promoted"]:
@@ -539,18 +568,34 @@ async def cases(request: Request, q: str = "", risk: str = "all", surface: str =
     needle = q.lower().strip()
     result=[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())]
     audit(user,"findings_searched","evidence_collection",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"query":q,"risk":risk,"surface":surface,"results":len(result)})
-    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count()}
+    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count(),"sync":dict(_finding_sync_status)}
+
+def transcript_text(value: Any) -> str:
+    if isinstance(value, str): return value
+    if isinstance(value, list): return "\n".join(filter(None, (transcript_text(part) for part in value)))
+    if isinstance(value, dict):
+        if "text" in value: return transcript_text(value["text"])
+        if "content" in value: return transcript_text(value["content"])
+        if "input" in value:
+            arguments = value["input"]
+            return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+    return ""
+
 
 async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
     sem=asyncio.Semaphore(8)
     async def one(item):
         async with sem:
             try:
-                if item["kind"]=="chat": data=await anthropic_get(f"/v1/compliance/apps/chats/{item['id']}/messages")
-                elif item["id"].startswith("cse_"): data=await anthropic_get(f"/v1/compliance/apps/sessions/remote/{item['id']}/messages")
-                else: data=await anthropic_get(f"/v1/compliance/apps/sessions/local/{item['id']}/messages")
-                raw=data.get("chat_messages") or data.get("messages") or data.get("data") or []
-                item["messages"]=[{"role":m.get("role") or m.get("sender") or m.get("type"),"created_at":m.get("created_at"),"text":m.get("text") or m.get("content") or ""} for m in raw]
+                if item["kind"]=="chat": path=f"/v1/compliance/apps/chats/{item['id']}/messages"
+                elif item["id"].startswith("cse_"): path=f"/v1/compliance/apps/sessions/remote/{item['id']}/messages"
+                else: path=f"/v1/compliance/apps/sessions/local/{item['id']}/messages"
+                raw = await _fetch_all(path)
+                item["messages"] = []
+                for message in raw:
+                    role = message.get("role") or message.get("sender") or message.get("type")
+                    item["messages"].append({**message, "source_role":role, "role":"human" if role=="user" else role,
+                        "text":transcript_text(message.get("text") or message.get("content") or "")})
             except (HTTPException, httpx.RequestError) as exc:
                 audit("system", "finding_hydration_failed", "evidence", str(item.get("id") or ""),
                       details={"error_type":type(exc).__name__, "status":getattr(exc, "status_code", None)})
@@ -558,21 +603,29 @@ async def hydrate_live(rows: list[dict[str,Any]]) -> list[dict[str,Any]]:
             return item
     return [item for item in await asyncio.gather(*(one(x) for x in rows)) if item is not None]
 
-FINDINGS_SYNC_MAX_ITEMS = max(100, min(int(os.getenv("FINDINGS_SYNC_MAX_ITEMS", "2000")), 50000))
+
+FINDINGS_SYNC_MAX_ITEMS = max(0, int(os.getenv("FINDINGS_SYNC_MAX_ITEMS", "0")))
+
 
 async def _fetch_all(path: str) -> list[dict[str, Any]]:
-    """Follow has_more/last_id pagination; a single page (no has_more) degrades gracefully."""
-    items: list[dict[str, Any]] = []; after = None
-    while len(items) < FINDINGS_SYNC_MAX_ITEMS:
-        params = [("limit", "100")] + ([("after_id", after)] if after else [])
-        try: page = await anthropic_get(path, params)
-        except HTTPException as e:
-            if e.status_code == 403: return items
-            raise
-        data = page.get("data", []); items.extend(data)
-        after = page.get("last_id") or (data[-1].get("id") if data else None)
-        if not page.get("has_more") or not data or not after: break
-    return items[:FINDINGS_SYNC_MAX_ITEMS]
+    """Chats use after_id/last_id; sessions use page/next_page. Never score partial walks."""
+    items: list[dict[str, Any]] = []; cursor = None; seen = set()
+    sessions = "/sessions/" in path
+    while True:
+        params = [("limit", "100")] + ([("page" if sessions else "after_id", cursor)] if cursor else [])
+        page = await anthropic_get(path, params)
+        data = page.get("chat_messages") if "chat_messages" in page else page.get("messages") if "messages" in page else page.get("data")
+        if not isinstance(data, list): raise HTTPException(502, "Claude returned an invalid evidence page")
+        items.extend(data)
+        if FINDINGS_SYNC_MAX_ITEMS and len(items) > FINDINGS_SYNC_MAX_ITEMS:
+            raise HTTPException(502, "FINDINGS_SYNC_MAX_ITEMS exceeded; increase it or set 0 for full coverage")
+        cursor = page.get("next_page") if sessions else page.get("last_id")
+        more = bool(cursor) if sessions else page.get("has_more", False)
+        if not more: return items
+        if not cursor or cursor in seen or not data:
+            raise HTTPException(502, "Claude pagination did not advance")
+        seen.add(cursor)
+
 
 async def _live_index():
     chats_raw = await _fetch_all("/v1/compliance/apps/chats")
@@ -592,19 +645,8 @@ async def case_detail(case_id: str, request: Request, user: str = Depends(curren
     stored=await asyncio.to_thread(get_finding,case_id)
     if stored:
         audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":stored.get("surface")}); return stored
-    if case_id.startswith("m365:"):
-        item=_m365_evidence.get(case_id)
-        if not item:
-            await m365_cases(); item=_m365_evidence.get(case_id)
-        if not item: raise HTTPException(404, "Microsoft 365 Copilot evidence not found")
-        audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent",""),{"surface":item.get("surface")}); return score_evidence(item)
-    if case_id.startswith("claude_chat_"):
-        data = await anthropic_get(f"/v1/compliance/apps/chats/{case_id}/messages")
-    elif case_id.startswith("cse_"):
-        data = await anthropic_get(f"/v1/compliance/apps/sessions/remote/{case_id}/messages")
-    else:
-        data = await anthropic_get(f"/v1/compliance/apps/sessions/local/{case_id}/messages")
-    audit(user,"evidence_viewed","evidence",case_id,request.client.host if request.client else "",request.headers.get("user-agent","")); return data
+    raise HTTPException(404, "Retained evidence not found")
+
 
 def _case_or_404(case_id: int) -> dict[str, Any]:
     try: return get_case(case_id)
@@ -760,7 +802,7 @@ async def organizations(request: Request, user: str = Depends(current_user)):
 def providers(request: Request, user: str = Depends(current_user)):
     audit(user,"providers_viewed","configuration",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     return {"data":[
-        {"id":"anthropic","name":"Claude Compliance API","enabled":not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
+        {"id":"anthropic","name":"Claude Compliance API","enabled":bool(API_KEY) and not DEMO,"surfaces":["Claude.ai","Claude Code","Cowork"]},
         {"id":"m365_copilot","name":"Microsoft 365 Copilot","enabled":M365_ENABLED,"surfaces":["Copilot Chat","Word","Excel","PowerPoint","Outlook"]}
     ]}
 
@@ -1019,7 +1061,7 @@ def remove_report_schedule(schedule_id: int, request: Request, user: str = Depen
 @app.get("/api/connectors/status")
 def connector_status(user: str = Depends(current_user)):
     return {"data":[
-        {"id":"anthropic_compliance","name":"Claude Compliance evidence","configured":not DEMO,"mode":"live" if not DEMO else "demo"},
+        {"id":"anthropic_compliance","name":"Claude Compliance evidence","configured":bool(API_KEY) and not DEMO,"mode":"demo" if DEMO else "live" if API_KEY else "not_configured"},
         {"id":"m365_interactions","name":"Microsoft 365 Copilot interactions","configured":M365_ENABLED,"mode":"live" if M365_ENABLED else "not_configured"},
         {"id":"usage_import","name":"Monthly XLSX/CSV analytics","configured":bool(list_usage_periods()) or DEMO,"mode":"imported" if list_usage_periods() else "demo" if DEMO else "not_configured"},
         {"id":"smtp","name":"Scheduled report email delivery","configured":smtp_configured(),"mode":"live" if smtp_configured() else "artifact_only"}]}

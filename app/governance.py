@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+PIPELINE_VERSION = "ingestion-2026.09.2"
 DB_PATH = Path(os.getenv("DATABASE_PATH", "data/jo-ai-monitor.db"))
 FINDING_THRESHOLD = max(0, min(int(os.getenv("RISK_FINDING_THRESHOLD", "40")), 100))
 _lock = threading.Lock()
@@ -44,6 +45,8 @@ def init_db() -> None:
             db.execute("ALTER TABLE suppressed_evidence ADD COLUMN recheck_at TEXT")
             # Legacy decisions have no expiry metadata; reevaluate them once.
             db.execute("UPDATE suppressed_evidence SET rule_version=''")
+        if "pipeline_version" not in columns:
+            db.execute("ALTER TABLE suppressed_evidence ADD COLUMN pipeline_version TEXT NOT NULL DEFAULT ''")
         db.commit()
 
 def audit(actor: str, action: str, object_type: str = "", object_id: str = "",
@@ -125,7 +128,7 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
         if all(not scope.get(key) or str(scope[key]).casefold()==str(context.get(key) or "").casefold() for key in context): matching.append(scope)
     if matching: threshold=max(int(scope["finding_threshold"]) for scope in matching)
     score=min(score,100); severity="critical" if score>=bands["critical"] else "high" if score>=bands["high"] else "medium" if score>=bands["medium"] else "low" if score>=bands["low"] else "informational"
-    item.update(risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
+    item.update(risk_pipeline_version=PIPELINE_VERSION,risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
         risk_scope_ids=[scope["id"] for scope in matching],policy_exception_id=exception.get("id") if exception else None,
         risk_recheck_at=exception.get("expires_at") if exception else None,
         promoted=score>=threshold and exception is None)
@@ -134,8 +137,8 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
 def record_suppressed(item: dict[str,Any], provider: str) -> None:
     init_db(); user=item.get("user") or {}; reason="policy_exception" if item.get("policy_exception_id") else "below_finding_threshold"
     with closing(sqlite3.connect(DB_PATH)) as db:
-        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version,updated_at,recheck_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown"),item.get("updated_at"),item.get("risk_recheck_at")))
+        db.execute("INSERT OR REPLACE INTO suppressed_evidence(evidence_id,observed_at,provider,user_id,surface,risk_score,reason,rule_version,updated_at,recheck_at,pipeline_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (item.get("id"),datetime.now(timezone.utc).isoformat(),provider,user.get("id") or user.get("email"),item.get("surface"),item.get("risk_score",0),reason,item.get("risk_rule_version","unknown"),item.get("updated_at"),item.get("risk_recheck_at"),item.get("risk_pipeline_version",PIPELINE_VERSION)))
         db.commit()
 
 def suppressed_count() -> int:

@@ -157,6 +157,8 @@ class PagePermissionTests(unittest.TestCase):
 
 class FindingSyncTests(unittest.TestCase):
     def setUp(self):
+        key_patch = patch.object(main, "API_KEY", "test-key")
+        key_patch.start(); self.addCleanup(key_patch.stop)
         client.cookies.clear()
         _repoint_databases()
         connection = sqlite3.connect(DB)
@@ -285,9 +287,69 @@ class FindingSyncTests(unittest.TestCase):
             with self.assertRaises(HTTPException): asyncio.run(main.m365_cases())
 
 
+    def test_session_index_uses_next_page_cursor(self):
+        for kind in ("local","remote"):
+            with patch.object(main,"anthropic_get",AsyncMock(side_effect=[{"data":[{"id":"one"}],"next_page":"opaque"},{"data":[{"id":"two"}],"next_page":None}])) as fetch:
+                rows=asyncio.run(main._fetch_all(f"/v1/compliance/apps/sessions/{kind}"))
+            self.assertEqual(len(rows),2); self.assertEqual(fetch.call_args.args[1],[("limit","100"),("page","opaque")])
+
+    def test_structured_transcripts_follow_pages_and_preserve_blocks(self):
+        for kind,id_,cursor_key in (("chat","claude_chat_long","last_id"),("session","clls_long","next_page"),("session","cse_long","next_page")):
+            block={"type":"text","text":"hack production"}
+            first={"data":[{"role":"user","content":[block]}],cursor_key:"opaque","has_more":True}
+            last={"data":[{"role":"assistant","content":[{"type":"tool_use","input":{"command":"disable logging"}}]}],"has_more":False}
+            with patch.object(main,"anthropic_get",AsyncMock(side_effect=[first,last])) as fetch:
+                rows=asyncio.run(main.hydrate_live([{**self._sync_item(),"kind":kind,"id":id_}]))
+            self.assertEqual(len(rows[0]["messages"]),2)
+            self.assertEqual(rows[0]["messages"][0]["text"],"hack production")
+            self.assertEqual(rows[0]["messages"][0]["role"],"human")
+            self.assertEqual(rows[0]["messages"][0]["content"],[block])
+            self.assertIn("disable logging", rows[0]["messages"][1]["text"])
+
+    def test_pagination_cap_and_repeated_cursor_fail_visibly(self):
+        from fastapi import HTTPException
+        with patch.object(main,"FINDINGS_SYNC_MAX_ITEMS",1),patch.object(main,"anthropic_get",AsyncMock(return_value={"data":[{"id":"one"},{"id":"two"}]})):
+            with self.assertRaises(HTTPException): asyncio.run(main._fetch_all("/chats"))
+        with patch.object(main,"anthropic_get",AsyncMock(return_value={"data":[{"id":"one"}],"has_more":True,"last_id":"stuck"})):
+            with self.assertRaises(HTTPException): asyncio.run(main._fetch_all("/chats"))
+
+    def test_sync_failure_and_partial_results_are_visible(self):
+        from fastapi import HTTPException
+        with patch.object(main,"_sync_provider_findings",AsyncMock(side_effect=HTTPException(403,"secret upstream message"))):
+            with self.assertRaises(HTTPException): asyncio.run(main.sync_provider_findings())
+        self.assertEqual(main._finding_sync_status["state"],"failed")
+        self.assertNotIn("secret",main._finding_sync_status["error"])
+        with patch.object(main,"_sync_provider_findings",AsyncMock(return_value={"failed":2})):
+            asyncio.run(main.sync_provider_findings())
+        self.assertEqual(main._finding_sync_status["state"],"partial")
+        with patch.object(main,"_sync_provider_findings",AsyncMock(return_value={"failed":0})):
+            asyncio.run(main.sync_provider_findings())
+        self.assertEqual(main._finding_sync_status["state"],"ok")
+        self.assertIsNotNone(main._finding_sync_status["last_success_at"])
+
+    def test_graph_user_discovery_pages_to_configured_limit(self):
+        with patch.object(main,"M365_USERS",[]),patch.object(main,"M365_MAX_USERS",2),patch.object(main,"graph_get",AsyncMock(side_effect=[{"value":[{"id":"one"}],"@odata.nextLink":"https://graph.microsoft.com/next"},{"value":[{"id":"two"},{"id":"three"}]}])):
+            self.assertEqual([u["id"] for u in asyncio.run(main.m365_users())],["one","two"])
+
+    def test_graph_rejects_foreign_next_link_before_obtaining_token(self):
+        from fastapi import HTTPException
+        with patch.object(main,"graph_token",AsyncMock()) as token:
+            with self.assertRaises(HTTPException): asyncio.run(main.graph_get("https://example.com/collect"))
+        token.assert_not_called()
+
+
+    def test_unretained_evidence_cannot_be_rehydrated_through_detail_api(self):
+        cookies={"cm_session":main.make_token("admin",{"Compliance.Admin"},"local")}
+        with patch.object(main,"DEMO",False),patch.object(main,"anthropic_get",AsyncMock()) as anthropic,patch.object(main,"m365_cases",AsyncMock()) as copilot:
+            for evidence_id in ("claude_chat_deleted","m365:someone:deleted"):
+                response=client.get(f"/api/cases/{evidence_id}",cookies=cookies)
+                self.assertEqual(response.status_code,404)
+            anthropic.assert_not_called();copilot.assert_not_called()
+
+
 class LiveModeGuardTests(unittest.TestCase):
     def _boot(self, name, extra_env):
-        env = {**os.environ, "DEMO_MODE": "false", "ANTHROPIC_COMPLIANCE_ACCESS_KEY": "test-key",
+        env = {**os.environ, "DEMO_MODE": "false", "COOKIE_SECURE":"true", "ANTHROPIC_COMPLIANCE_ACCESS_KEY": "test-key",
                "DATABASE_PATH": str(TMP / f"guard-{name}.db"), "ATTACHMENT_PATH": str(TMP / "guard-attachments"), **extra_env}
         return subprocess.run([sys.executable, "-c", "import app.main"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120)
 
@@ -314,6 +376,48 @@ class LiveModeGuardTests(unittest.TestCase):
         env = {**os.environ, "DEMO_MODE": "true", "DATABASE_PATH": str(TMP / "guard-demo.db"), "ATTACHMENT_PATH": str(TMP / "guard-attachments")}
         result = subprocess.run([sys.executable, "-c", "import app.main"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_live_without_provider_refuses_demo_fallback(self):
+        result=self._boot("no-provider",{"ANTHROPIC_COMPLIANCE_ACCESS_KEY":"", "M365_COPILOT_TENANT_ID":"", "M365_COPILOT_CLIENT_ID":"", "M365_COPILOT_CLIENT_SECRET":"", "SESSION_SECRET":"s"*40,"APP_PASSWORD":"strong-password"})
+        self.assertNotEqual(result.returncode,0);self.assertIn("at least one live evidence provider",result.stderr)
+
+    def test_live_requires_secure_cookies_and_a_login_method(self):
+        for name,values,message in (("cookies",{"COOKIE_SECURE":"false"},"COOKIE_SECURE"),("auth",{"LOCAL_AUTH_ENABLED":"false","ENTRA_CLIENT_SECRET":""},"Configure Entra")):
+            result=self._boot(name,{"SESSION_SECRET":"s"*40,"APP_PASSWORD":"strong-password",**values})
+            self.assertNotEqual(result.returncode,0); self.assertIn(message,result.stderr)
+
+    def test_copilot_only_live_configuration_boots(self):
+        result=self._boot("copilot",{"ANTHROPIC_COMPLIANCE_ACCESS_KEY":"", "M365_COPILOT_TENANT_ID":"tenant", "M365_COPILOT_CLIENT_ID":"client", "M365_COPILOT_CLIENT_SECRET":"secret", "SESSION_SECRET":"s"*40,"APP_PASSWORD":"strong-password"})
+        self.assertEqual(result.returncode,0,result.stderr)
+
+
+class ReleaseAuthTests(unittest.TestCase):
+    def setUp(self):
+        client.cookies.clear();_repoint_databases()
+
+    def test_entra_callback_enforces_tenant_roles_and_secure_cookie(self):
+        from types import SimpleNamespace
+        claims={"tid":"tenant","roles":["Compliance.Reviewer"],"preferred_username":"reviewer@example.com"}
+        entra=SimpleNamespace(authorize_access_token=AsyncMock(return_value={"userinfo":claims}))
+        with patch.object(main,"ENTRA_ENABLED",True),patch.object(main,"ENTRA_TENANT","tenant"),patch.object(main,"ENTRA_ROLES",{"Compliance.Reviewer"}),patch.object(main,"ENTRA_GROUPS",set()),patch.object(main,"COOKIE_SECURE",True),patch.object(main,"oauth",SimpleNamespace(entra=entra)):
+            response=client.get("/api/auth/entra/callback",follow_redirects=False)
+            self.assertEqual(response.status_code,302)
+            self.assertIn("Secure",response.headers["set-cookie"]);self.assertIn("HttpOnly",response.headers["set-cookie"])
+            claims["tid"]="foreign"
+            response=client.get("/api/auth/entra/callback",follow_redirects=False)
+            self.assertIn("tenant_not_allowed",response.headers["location"])
+            self.assertNotIn("set-cookie",response.headers)
+            claims["tid"]="tenant";claims["roles"]=[]
+            response=client.get("/api/auth/entra/callback",follow_redirects=False)
+            self.assertIn("access_not_assigned",response.headers["location"])
+
+    def test_startup_shutdown_and_sensitive_response_cache(self):
+        with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
+            with TestClient(main.app) as active:
+                self.assertEqual(active.get("/health").json()["version"],"0.9.7")
+                self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
+                self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
 
 if __name__ == "__main__":

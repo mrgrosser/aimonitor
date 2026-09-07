@@ -106,7 +106,7 @@ class FindingStoreTests(unittest.TestCase):
         governance.init_db()
         self.assertEqual(finding_store.known_versions()["legacy"],("timestamp",""))
         with closing(sqlite3.connect(finding_store.DB_PATH)) as db, db:
-            db.execute("UPDATE suppressed_evidence SET rule_version='rescored'")
+            db.execute("UPDATE suppressed_evidence SET rule_version='rescored',pipeline_version=?",(governance.PIPELINE_VERSION,))
         governance.init_db()
         self.assertEqual(finding_store.known_versions()["legacy"],("timestamp","rescored"))
 

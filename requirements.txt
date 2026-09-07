@@ -1,8 +1,9 @@
-fastapi==0.115.6
+fastapi==0.141.1
+starlette==1.6.0
 uvicorn[standard]==0.34.0
 httpx==0.28.1
-python-multipart==0.0.20
-Authlib==1.4.1
+python-multipart==0.0.32
+Authlib==1.8.0
 itsdangerous==2.2.0
 openpyxl==3.1.5
 reportlab==4.2.5
