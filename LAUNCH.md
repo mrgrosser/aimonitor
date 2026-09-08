@@ -45,3 +45,7 @@ Claude requests share a per-process gate with at least 250 ms between attempts. 
 Risk indicators use user-authored text only. Assistant output, tool blocks, generated titles, summaries, and resource labels do not contribute to the user score. Missing department/groups or workflow approval are unknown, not violations; explicit `approved_workflow=false` represents an unapproved workflow. This remains keyword screening for analyst review, not a determination of intent or a confirmed incident. Unknown roles and non-text attachments are not scored.
 
 At the next sync, retained evidence with an older scoring pipeline is rescored before provider requests. Below-threshold records leave the queue but retain their transcript and original retention clock. Existing investigation snapshots and historical alerts remain historical records. Suppressed metadata from older pipelines is reevaluated when provider content is fetched successfully.
+
+### Copilot discovery
+
+Leave `M365_COPILOT_USER_IDS` empty to discover users. `M365_COPILOT_MAX_USERS=0` follows all directory pages without a user cap (default remains 100). Per-user history failures are audited as `copilot_user_sync_failed` and reported as partial sync coverage while successful users continue. Discovery/token failures still fail the sync. HTML bodies are converted to plain text for display and scoring; the original body is retained in evidence JSON.

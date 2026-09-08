@@ -281,6 +281,28 @@ class FindingSyncTests(unittest.TestCase):
         self.assertEqual(fetch.await_count,2); self.assertEqual(fetch.call_args.args[0],"https://graph.microsoft.com/next")
         self.assertEqual(len(rows),1); self.assertEqual(len(rows[0]["messages"]),2); self.assertEqual(rows[0]["provider"],"m365")
 
+    def test_copilot_user_failure_preserves_successful_users(self):
+        from fastapi import HTTPException
+        failures=[]
+        async def get(url):
+            if "/bad/" in url: raise HTTPException(403,"Forbidden")
+            return {"value":[{"id":"p","interactionType":"userPrompt","body":{"contentType":"html","content":"<br>Use &lt;name&gt;<script>bad()</script>"}}]}
+        with patch.object(main,"m365_users",AsyncMock(return_value=[{"id":"bad"},{"id":"good"}])), patch.object(main,"graph_get",AsyncMock(side_effect=get)):
+            rows=asyncio.run(main.m365_cases(failures=failures))
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["title"],"Use <name>")
+        self.assertIn("<br>",rows[0]["messages"][0]["raw_body"]["content"])
+        self.assertEqual(failures[0]["status"],403)
+        self.assertEqual(failures[0]["user_id"],"bad")
+
+    def test_copilot_unlimited_discovery_follows_all_pages(self):
+        pages=[{"value":[{"id":"one"}],"@odata.nextLink":"https://graph.microsoft.com/next"},{"value":[{"id":"two"}]}]
+        with patch.object(main,"M365_USERS",[]),patch.object(main,"M365_MAX_USERS",0),patch.object(main,"graph_get",AsyncMock(side_effect=pages)):
+            self.assertEqual(len(asyncio.run(main.m365_users())),2)
+
+    def test_copilot_plain_text_keeps_angle_brackets(self):
+        self.assertEqual(main.copilot_text({"contentType":"text","content":"a < b && c > d"}),"a < b && c > d")
+
     def test_copilot_partial_page_failure_does_not_store_partial_evidence(self):
         from fastapi import HTTPException
         with patch.object(main,"m365_users",AsyncMock(return_value=[{"id":"u"}])), patch.object(main,"graph_get",AsyncMock(side_effect=[{"value":[{"id":"p"}],"@odata.nextLink":"https://graph.microsoft.com/next"},HTTPException(503,"Unavailable")])):

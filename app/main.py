@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 from .compliance_http import compliance_gate
 import base64
 import asyncio
@@ -70,7 +71,7 @@ M365_TENANT = os.getenv("M365_COPILOT_TENANT_ID", "").strip()
 M365_CLIENT = os.getenv("M365_COPILOT_CLIENT_ID", "").strip()
 M365_SECRET = os.getenv("M365_COPILOT_CLIENT_SECRET", "").strip()
 M365_USERS = [x.strip() for x in os.getenv("M365_COPILOT_USER_IDS", "").split(",") if x.strip()]
-M365_MAX_USERS = max(1, min(int(os.getenv("M365_COPILOT_MAX_USERS", "100")), 999))
+M365_MAX_USERS = max(0, int(os.getenv("M365_COPILOT_MAX_USERS", "100")))
 M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
 _refuse_insecure_live_config()
 CASE_READ_ROLES = {x.strip() for x in os.getenv("CASE_READ_ROLES","Compliance.Admin,Compliance.Investigator,Compliance.Reviewer,Compliance.Auditor").split(",") if x.strip()}
@@ -279,19 +280,39 @@ async def graph_get(url: str) -> dict[str, Any]:
     return res.json()
 
 async def m365_users() -> list[dict[str,str]]:
-    if M365_USERS: return [{"id":x,"email":x} for x in M365_USERS[:M365_MAX_USERS]]
-    users=[]; seen=set(); url=f"/users?$select=id,displayName,mail,userPrincipalName&$top={M365_MAX_USERS}"
-    while url and len(users)<M365_MAX_USERS:
+    if M365_USERS: return [{"id":x,"email":x} for x in (M365_USERS[:M365_MAX_USERS] if M365_MAX_USERS else M365_USERS)]
+    users=[]; seen=set(); url=f"/users?$select=id,displayName,mail,userPrincipalName&$top={min(M365_MAX_USERS or 999,999)}"
+    while url and (not M365_MAX_USERS or len(users)<M365_MAX_USERS):
         if url in seen: raise HTTPException(502, "Microsoft Graph user pagination did not advance")
         seen.add(url); data=await graph_get(url); users.extend(data.get("value",[])); url=data.get("@odata.nextLink")
-    return [{"id":x["id"],"email":x.get("mail") or x.get("userPrincipalName") or x["id"]} for x in users[:M365_MAX_USERS]]
+    return [{"id":x["id"],"email":x.get("mail") or x.get("userPrincipalName") or x["id"]} for x in (users[:M365_MAX_USERS] if M365_MAX_USERS else users)]
 
 def m365_surface(app_class: str) -> str:
     leaf=(app_class or "").split(".")[-1]
     names={"BizChat":"M365 Copilot Chat","Teams":"M365 Copilot Chat","Word":"Copilot in Word","Excel":"Copilot in Excel","PowerPoint":"Copilot in PowerPoint","Outlook":"Copilot in Outlook"}
     return names.get(leaf, f"Microsoft 365 Copilot · {leaf}" if leaf else "Microsoft 365 Copilot")
 
-async def m365_cases() -> list[dict[str,Any]]:
+class _CopilotText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True); self.parts=[]; self.hidden=0
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script","style"}: self.hidden+=1
+        if tag in {"br","p","div","li"}: self.parts.append("\n")
+    def handle_endtag(self, tag):
+        if tag in {"script","style"}: self.hidden=max(0,self.hidden-1)
+        if tag in {"p","div","li"}: self.parts.append("\n")
+    def handle_data(self, data):
+        if not self.hidden: self.parts.append(data)
+
+
+def copilot_text(body):
+    content=body.get("content") or ""
+    if str(body.get("contentType","")).lower() != "html": return content
+    parser=_CopilotText(); parser.feed(content); parser.close()
+    return "".join(parser.parts).strip()
+
+
+async def m365_cases(failures: list | None = None) -> list[dict[str,Any]]:
     users=await m365_users(); sem=asyncio.Semaphore(6)
     async def fetch(u):
         async with sem:
@@ -305,8 +326,12 @@ async def m365_cases() -> list[dict[str,Any]]:
                     interactions.extend(page.get("value", []))
                     url = page.get("@odata.nextLink")
                 return u, interactions
-            except HTTPException:
-                raise
+            except (HTTPException, httpx.RequestError) as exc:
+                if failures is None: raise
+                detail={"user_id":u["id"],"status":getattr(exc,"status_code",None),"error_type":type(exc).__name__}
+                failures.append(detail)
+                audit("system","copilot_user_sync_failed","user",str(u["id"]),details=detail)
+                return u, []
     results=await asyncio.gather(*(fetch(u) for u in users))
     cases=[]
     for u,interactions in results:
@@ -316,13 +341,13 @@ async def m365_cases() -> list[dict[str,Any]]:
             grouped.setdefault(key,[]).append(item)
         for request_id,items in grouped.items():
             items.sort(key=lambda x:x.get("createdDateTime", "")); prompt=next((x for x in items if x.get("interactionType")=="userPrompt"),items[0])
-            body=(prompt.get("body") or {}).get("content") or "Microsoft 365 Copilot interaction"
+            body=copilot_text(prompt.get("body") or {}) or "Microsoft 365 Copilot interaction"
             cid=f"m365:{u['id']}:{request_id}"; contexts=[]
             for x in items:
                 contexts.extend(x.get("contexts") or [])
             case={"id":cid,"kind":"copilot","provider":"m365","risk":"unreviewed","status":"new","created_at":items[0].get("createdDateTime"),"updated_at":items[-1].get("createdDateTime"),
                 "user":u,"surface":m365_surface(prompt.get("appClass","")),"title":body[:90],"summary":"Microsoft 365 Copilot prompt/response evidence available for review.","matched":[],"contexts":contexts,
-                "messages":[{"role":"human" if x.get("interactionType")=="userPrompt" else "assistant","created_at":x.get("createdDateTime"),"text":(x.get("body") or {}).get("content") or "","request_id":x.get("requestId")} for x in items]}
+                "messages":[{"role":"human" if x.get("interactionType")=="userPrompt" else "assistant","created_at":x.get("createdDateTime"),"text":copilot_text(x.get("body") or {}),"raw_body":x.get("body") or {},"request_id":x.get("requestId")} for x in items]}
             cases.append(case)
     return cases
 
@@ -510,8 +535,8 @@ async def sync_provider_findings() -> dict[str, int]:
     except Exception as exc:
         _finding_sync_status.update(state="failed", error=f"Provider sync failed ({getattr(exc, 'status_code', type(exc).__name__)}). Check access audit.")
         raise
-    if result.get("failed", 0):
-        _finding_sync_status.update(state="partial", error=f"{result['failed']} transcript(s) could not be read; they will be retried.")
+    if result.get("failed", 0) or result.get("copilot_users_failed",0):
+        _finding_sync_status.update(state="partial", error=f"{result.get('failed',0)} transcript(s) and {result.get('copilot_users_failed',0)} Copilot user(s) could not be read; they will be retried. Check access audit.")
     else:
         _finding_sync_status.update(state="ok", last_success_at=datetime.now(timezone.utc).isoformat())
     return result
@@ -524,12 +549,13 @@ async def _sync_provider_findings() -> dict[str, int]:
     if any(rescored.values()): audit("system", "findings_rescored", "findings", details=rescored)
     expired = await asyncio.to_thread(expired_finding_ids)
     chats,local,remote=await _live_index() if API_KEY else ([],[],[]); index=chats+local+remote
-    if M365_ENABLED: index+=await m365_cases()
+    copilot_failures=[]
+    if M365_ENABLED: index+=await m365_cases(failures=copilot_failures)
     known=await asyncio.to_thread(known_versions); version=active_policy()["version"]
     changed=[x for x in index if str(x.get("id")) not in expired and (str(x.get("id")) not in known or known[str(x.get("id"))]!=((x.get("updated_at") or ""),version))]
     hydrated=await hydrate_live([x for x in changed if x.get("kind")!="copilot"])+[x for x in changed if x.get("kind")=="copilot"]
     connectors=[item["id"] for item in connector_health() if item["configured"]]
-    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":pruned,"failed":len(changed)-len(hydrated)}
+    counts={"scored":0,"promoted":0,"suppressed":0,"pruned":pruned,"failed":len(changed)-len(hydrated),"copilot_users_failed":len(copilot_failures)}
     for row in hydrated:
         score_evidence(row); counts["scored"]+=1; provider="m365" if row.get("kind")=="copilot" else "anthropic"
         if row["promoted"]:
