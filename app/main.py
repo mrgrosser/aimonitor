@@ -39,7 +39,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.9.10")
+APP_VERSION = os.getenv("APP_VERSION", "0.10.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -484,7 +484,7 @@ async def entra_callback(request: Request):
 @app.get("/api/auth/me")
 def me(request: Request, user: str = Depends(current_user)):
     identity=current_identity(request)
-    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"pages":allowed_pages(identity),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"usage_import":can_import_usage(identity),"usage_user_detail":identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
+    return {"user":user,"mode":"demo" if DEMO else "live","roles":sorted(identity["roles"]),"pages":allowed_pages(identity),"named_user_reports":identity["method"]=="local" or bool(identity["roles"] & REPORT_ROLES),"usage_import":can_import_usage(identity),"report_schedule_admin":identity["method"]=="local" or "Compliance.Admin" in identity["roles"],"usage_user_detail":identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES),"case_read":identity["method"]=="local" or bool(identity["roles"] & CASE_READ_ROLES),"case_write":identity["method"]=="local" or bool(identity["roles"] & CASE_WRITE_ROLES)}
 
 def can_view_named_users(request: Request) -> bool:
     identity=current_identity(request)
@@ -980,9 +980,40 @@ def usage_importer(request: Request) -> str:
 
 def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]:
     identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
+    if not named:
+        from app.usage_reporting import _alias
+        def redact(value):
+            if isinstance(value,dict): return {k:redact(v) for k,v in value.items()}
+            if isinstance(value,list): return [redact(v) for v in value]
+            if isinstance(value,str): return re.sub(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+",lambda m:_alias(m.group(0)),value)
+            return value
+        data=redact(data)
     return {**data,"user_detail_included":named,"top_users":[{**row,
         "user":row.get("user") if named else row.get("alias",row.get("user")),
         "products":row.get("products",[]),"breakdown":row.get("breakdown",[])} for row in data.get("top_users",[])]}
+
+
+@app.get("/api/reports/executive/periods")
+def executive_periods(request: Request, user: str = Depends(current_user)):
+    return usage_periods(request,user)
+
+
+@app.get("/api/reports/executive")
+def executive_report(request: Request, period: str = "", report_format: str = Query("preview",alias="format"), user: str = Depends(current_user)):
+    data=usage_for_identity(resolve_usage(period),request)
+    if report_format not in {"preview","xlsx","pdf","html","csv","json"}:
+        raise HTTPException(400,"Unsupported executive report format")
+    if report_format not in {"preview","xlsx"}:
+        return usage_report(request,period,report_format,user)
+    audit(user,"executive_report_generated","usage_report",str(data.get("period") or ""),details={"format":report_format,"named_users":data["user_detail_included"]})
+    if report_format=="preview":
+        from app.report_charts import charts_html
+        return {**data,"charts_html":charts_html(data)}
+    from app.executive_reporting import executive_xlsx
+    safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
+    return Response(executive_xlsx(data),media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":f'attachment; filename="jo-ai-usage-{safe}.xlsx"',"Cache-Control":"no-store"})
+
 
 @app.get("/api/usage")
 def usage_analytics(request: Request, period: str = "", user: str = Depends(current_user)):
@@ -1075,8 +1106,15 @@ def report_schedules(request: Request, user: str = Depends(current_user)):
     audit(user,"report_schedules_viewed","report_schedule",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     return {"data":list_schedules(),"smtp_configured":smtp_configured(),"named_user_authorized":can_view_named_users(request)}
 
+def report_schedule_admin(request: Request) -> str:
+    identity=require_page(request,"reports")
+    if identity["method"]!="local" and "Compliance.Admin" not in identity["roles"]:
+        raise HTTPException(403,"Report schedule changes require an administrator")
+    return identity["user"]
+
+
 @app.post("/api/report-schedules")
-async def add_report_schedule(request: Request, user: str = Depends(current_user)):
+async def add_report_schedule(request: Request, user: str = Depends(report_schedule_admin)):
     body=await request.json(); include=bool(body.get("include_named_users"))
     if include and not can_view_named_users(request): raise HTTPException(403,"Named-user reporting requires an approved report role")
     try: schedule=create_schedule(str(body.get("name") or "Compliance report"),body.get("recipients") or [],str(body.get("frequency") or "monthly"),str(body.get("format") or "pdf").lower(),include,user)
@@ -1085,7 +1123,7 @@ async def add_report_schedule(request: Request, user: str = Depends(current_user
     return schedule
 
 @app.delete("/api/report-schedules/{schedule_id}")
-def remove_report_schedule(schedule_id: int, request: Request, user: str = Depends(current_user)):
+def remove_report_schedule(schedule_id: int, request: Request, user: str = Depends(report_schedule_admin)):
     delete_schedule(schedule_id); audit(user,"report_schedule_deleted","report_schedule",str(schedule_id),request.client.host if request.client else "",request.headers.get("user-agent","")); return {"ok":True}
 
 @app.get("/api/connectors/status")

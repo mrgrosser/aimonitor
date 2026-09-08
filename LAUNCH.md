@@ -49,3 +49,15 @@ At the next sync, retained evidence with an older scoring pipeline is rescored b
 ### Copilot discovery
 
 Leave `M365_COPILOT_USER_IDS` empty to discover users. `M365_COPILOT_MAX_USERS=0` follows all directory pages without a user cap (default remains 100). Per-user history failures are audited as `copilot_user_sync_failed` and reported as partial sync coverage while successful users continue. Discovery/token failures still fail the sync. HTML bodies are converted to plain text for display and scoring; the original body is retained in evidence JSON.
+
+### Executive monthly reports (0.10.0)
+
+Reports now opens monthly AI usage reporting. An administrator imports the reference-format workbook under Usage & spend, previews validation, and confirms import. The CEO chooses an imported month and downloads the full Excel workbook or executive PDF. Detailed sections can be previewed with pagination. Compliance reports remain available through a separate button.
+
+The August layout with Department Summary uses strict reconciliation of user volumes and Claude detail spend; department names are not parsed as product counts, all users are retained, and unavailable licensing prices are not invented. Excel retains the 11 source sections and cached source values, with no executable imported formulas. PDF summarizes adoption, products, models, apps, departments, agents, daily activity, and top users. This is monthly import reporting, not automatic Purview/Claude analytics collection; the evidence API and risk-filtered findings are not a substitute for those sources. Previously imported August files should be reimported with Replace after previewing the corrected totals.
+
+For CEO access, create/assign the `Compliance.ReportsOnly` Entra application role and include it in `ENTRA_ALLOWED_ROLES` if sign-in is restricted by that setting. This role opens Reports and pseudonymizes email identities throughout previews and exports. It does not allow evidence browsing or imports. To authorize named usage reporting explicitly, add that role to `USAGE_USER_DETAIL_ROLES`; do not grant administrator access simply to enable report downloads. Existing compliance-report authorization remains separate.
+
+SQLite remains in use. Monthly report snapshots are read-heavy and suitable for one app process with the existing persistent volume and backups. Reassess PostgreSQL for multiple replicas or sustained concurrent writers. No database migration is included.
+
+Monthly executive reports include an app-mix chart, daily activity graph, and Claude product spend chart in the preview, PDF/print report, and Excel export. Charts use the imported monthly figures. Automatic Claude usage/cost collection is not connected yet; that requires the Enterprise Analytics API and a key with `read:analytics`. `read:spend_limits` is only needed for reporting configured limits, not actual usage costs.

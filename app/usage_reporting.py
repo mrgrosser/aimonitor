@@ -80,6 +80,10 @@ def _table_after(rows: list[list[Any]], first_header: str, stop: str = "Total") 
 
 def parse_xlsx(content: bytes, filename: str) -> dict[str, Any]:
     workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    if "Department Summary" in workbook.sheetnames:
+        from app.executive_reporting import import_monthly
+        try: return validate_usage(import_monthly(workbook,filename,_alias))
+        finally: workbook.close()
     summary_rows = _sheet_rows(workbook, "AI Usage Summary")
     product_rows = _sheet_rows(workbook, "Claude Product & Model")
     app_rows = _sheet_rows(workbook, "Copilot App Totals")
@@ -279,15 +283,35 @@ def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
     summary=data.get("summary",{}); licensing=data.get("licensing",{})
     metrics=[["Measure","Value"],["Copilot active users",summary.get("copilot_active_users",0)],["Copilot interactions",summary.get("copilot_interactions",0)],
         ["Claude active users",summary.get("claude_active_users",0)],["Claude API requests",summary.get("claude_requests",0)],
-        ["Claude usage spend",f"${_number(summary.get('claude_usage_spend')):,.2f}"],["Estimated monthly run rate",f"${_number(licensing.get('estimated_monthly_run_rate')):,.2f}"],
-        ["Unassigned Claude seats",licensing.get("claude_seats_unassigned",0)]]
+        ["Claude usage spend",f"${_number(summary.get('claude_usage_spend')):,.2f}"],["Estimated monthly run rate",f"${_number(licensing.get('estimated_monthly_run_rate')):,.2f}" if "estimated_monthly_run_rate" in licensing else "Not supplied"],
+        ["Unassigned Claude seats",licensing.get("claude_seats_unassigned","Not supplied")]]
     table=Table(metrics,colWidths=[3.6*inch,2.6*inch]); table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#172231")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#D8DEE6")),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F6F8FA")]),("PADDING",(0,0),(-1,-1),7)])); story += [table,Spacer(1,14)]
+    from app.report_charts import pdf_charts
+    drawings=pdf_charts(data)
+    if drawings: story += [PageBreak(),Paragraph("Usage at a glance",styles["Heading2"]),*drawings,PageBreak()]
     for title,rows,columns in [("Claude products",data.get("claude_products",[]),[("Product","name"),("Requests","requests"),("Spend","spend")]),
             ("Claude models",data.get("claude_models",[]),[("Model","name"),("Requests","requests"),("Spend","spend")]),
             ("Copilot applications",data.get("copilot_apps",[]),[("Application","name"),("Interactions","interactions"),("Users","users")])]:
         if title == "Copilot applications": story.append(PageBreak())
         story.append(Paragraph(title,styles["Heading2"])); values=[[x[0] for x in columns]]+[[f"${_number(row.get(key)):,.2f}" if key == "spend" else row.get(key,"") for _,key in columns] for row in rows]
         t=Table(values,repeatRows=1,colWidths=[3.5*inch,1.35*inch,1.35*inch]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#315FDC")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D8DEE6")),("PADDING",(0,0),(-1,-1),6)])); story += [t,Spacer(1,12)]
+    extra=[("Department adoption",data.get("departments",[]),[("Department","Department"),("Headcount","Headcount"),("Copilot users","Copilot users"),("Claude users","Claude users")]),
+        ("Copilot agents",data.get("copilot_agents",[]),[("Agent","Agent"),("Interactions","Interactions"),("Users","Users")]),
+        ("Copilot daily trend",data.get("copilot_daily",[]),[("Date","Date"),("Interactions","Interactions"),("Users","Active users")])]
+    for provider in ("Microsoft 365 Copilot","Claude Enterprise"):
+        selected=sorted([r for r in data.get("top_users",[]) if r.get("provider")==provider],key=lambda r:r.get("volume",0),reverse=True)[:10]
+        extra.append((provider+" — top 10 by recorded volume",selected,[("User","user"),("Department","department"),("Volume","volume")]))
+    for title,items,columns in extra:
+        if not items: continue
+        story.extend([PageBreak(),Paragraph(html.escape(title),styles["Heading2"])])
+        values=[[Paragraph(html.escape(label),styles["BodyText"]) for label,_ in columns]]
+        values.extend([[Paragraph(html.escape(str(row.get(key) if row.get(key) is not None else "Not supplied")),styles["BodyText"]) for _,key in columns] for row in items])
+        widths=[2.8*inch]+[(3.4*inch)/(len(columns)-1)]*(len(columns)-1)
+        t=Table(values,repeatRows=1,colWidths=widths)
+        t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E4EBF5")),("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D8DEE6")),("PADDING",(0,0),(-1,-1),6)]))
+        story.append(t)
+    story.append(Spacer(1,12))
+    story.append(Paragraph(html.escape(str(data.get("source",""))),styles["BodyText"]))
     story.append(Paragraph("Governance notes",styles["Heading2"]));
     for note in data.get("caveats",[]): story.append(Paragraph(f"- {html.escape(str(note))}",styles["BodyText"]))
     def footer(canvas, document):
@@ -299,4 +323,10 @@ def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
 def usage_html(data: dict[str, Any], actor: str, version: str) -> str:
     s=data.get("summary",{}); l=data.get("licensing",{})
     def rows(items,cols): return "".join("<tr>"+"".join(f"<td>{html.escape(str(x.get(c,'')))}</td>" for c in cols)+"</tr>" for x in items)
-    return f"""<!doctype html><html><head><meta charset='utf-8'><title>JO AI Monitor Report</title><style>body{{font:14px Arial;color:#172231;max-width:1000px;margin:36px auto;padding:0 20px}}h1{{margin-bottom:2px}}.meta{{color:#697386}}.cards{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}}.card{{border:1px solid #dce1e6;padding:14px;border-radius:8px}}.card b{{display:block;font-size:24px;margin-top:6px}}table{{width:100%;border-collapse:collapse;margin:8px 0 24px}}th,td{{border-bottom:1px solid #e4e7eb;padding:8px;text-align:left}}th{{background:#172231;color:#fff}}@media print{{button{{display:none}}body{{margin:0}}}}</style></head><body><button onclick='print()'>Print / Save PDF</button><h1>JO AI Monitor</h1><h2>Executive Usage &amp; Spend Report</h2><p class='meta'>{html.escape(str(data.get('period','')))} · Generated by {html.escape(actor)} · {html.escape(version)}</p><div class='cards'><div class='card'>Copilot interactions<b>{_integer(s.get('copilot_interactions')):,}</b></div><div class='card'>Claude requests<b>{_integer(s.get('claude_requests')):,}</b></div><div class='card'>Claude spend<b>${_number(s.get('claude_usage_spend')):,.2f}</b></div><div class='card'>Monthly run rate<b>${_number(l.get('estimated_monthly_run_rate')):,.2f}</b></div></div><h2>Claude products</h2><table><tr><th>Product</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_products',[]),['name','requests','spend'])}</table><h2>Claude models</h2><table><tr><th>Model</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_models',[]),['name','requests','spend'])}</table><h2>Copilot applications</h2><table><tr><th>Application</th><th>Interactions</th><th>Users</th></tr>{rows(data.get('copilot_apps',[]),['name','interactions','users'])}</table></body></html>"""
+    from app.report_charts import charts_html, CHART_CSS
+    sections=""
+    for section in data.get("executive_sections",[]):
+        if section["name"] in {"Copilot Detail","Claude Detail"}: continue
+        section_rows="".join("<tr>"+"".join(f"<td>{html.escape(str(v if v is not None else ''))}</td>" for v in row)+"</tr>" for row in section["rows"])
+        sections+=f"<h2>{html.escape(section['name'])}</h2><table>{section_rows}</table>"
+    return f"""<!doctype html><html><head><meta charset='utf-8'><title>JO AI Monitor Report</title><style>body{{font:14px Arial;color:#172231;max-width:1000px;margin:36px auto;padding:0 20px}}h1{{margin-bottom:2px}}.meta{{color:#697386}}.cards{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}}.card{{border:1px solid #dce1e6;padding:14px;border-radius:8px}}.card b{{display:block;font-size:24px;margin-top:6px}}table{{width:100%;border-collapse:collapse;margin:8px 0 24px}}th,td{{border-bottom:1px solid #e4e7eb;padding:8px;text-align:left}}th{{background:#172231;color:#fff}}@media print{{button{{display:none}}body{{margin:0}}}}{CHART_CSS}</style></head><body><button onclick='print()'>Print / Save PDF</button><h1>JO AI Monitor</h1><h2>Executive Usage &amp; Spend Report</h2><p class='meta'>{html.escape(str(data.get('period','')))} · Generated by {html.escape(actor)} · {html.escape(version)}</p><div class='cards'><div class='card'>Copilot interactions<b>{_integer(s.get('copilot_interactions')):,}</b></div><div class='card'>Claude requests<b>{_integer(s.get('claude_requests')):,}</b></div><div class='card'>Claude spend<b>${_number(s.get('claude_usage_spend')):,.2f}</b></div><div class='card'>Monthly run rate<b>${format(_number(l.get('estimated_monthly_run_rate')), ',.2f') if 'estimated_monthly_run_rate' in l else '—'}</b></div></div>{charts_html(data)}<h2>Claude products</h2><table><tr><th>Product</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_products',[]),['name','requests','spend'])}</table><h2>Claude models</h2><table><tr><th>Model</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_models',[]),['name','requests','spend'])}</table><h2>Copilot applications</h2><table><tr><th>Application</th><th>Interactions</th><th>Users</th></tr>{rows(data.get('copilot_apps',[]),['name','interactions','users'])}</table>{sections}</body></html>"""

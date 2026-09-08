@@ -418,6 +418,25 @@ class ReleaseAuthTests(unittest.TestCase):
     def setUp(self):
         client.cookies.clear();_repoint_databases()
 
+    def test_reports_only_executive_downloads_redact_all_sections(self):
+        import io
+        from openpyxl import load_workbook
+        token=main.make_token("ceo@example.com",{"Compliance.ReportsOnly"},"entra")
+        data={"period":"August 2026","summary":{},"top_users":[],"executive_sections":[{"name":"Detail","rows":[["person@example.com"]]}]}
+        with patch.object(main,"resolve_usage",return_value=data):
+            response=client.get("/api/reports/executive",cookies={"cm_session":token})
+            self.assertEqual(response.status_code,200)
+            self.assertNotIn("person@example.com",response.text)
+            self.assertFalse(response.json()["user_detail_included"])
+            response=client.get("/api/reports/executive?format=xlsx",cookies={"cm_session":token})
+            self.assertEqual(response.status_code,200)
+            workbook=load_workbook(io.BytesIO(response.content))
+            self.assertTrue(workbook["Detail"]["A1"].value.startswith("User "))
+            self.assertEqual(client.get("/api/cases",cookies={"cm_session":token}).status_code,403)
+            self.assertEqual(client.post("/api/usage/import",cookies={"cm_session":token}).status_code,403)
+            self.assertEqual(client.post("/api/report-schedules",cookies={"cm_session":token},json={}).status_code,403)
+            self.assertEqual(client.delete("/api/report-schedules/1",cookies={"cm_session":token}).status_code,403)
+
     def test_entra_callback_enforces_tenant_roles_and_secure_cookie(self):
         from types import SimpleNamespace
         claims={"tid":"tenant","roles":["Compliance.Reviewer"],"preferred_username":"reviewer@example.com"}
@@ -437,7 +456,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.9.10")
+                self.assertEqual(active.get("/health").json()["version"],"0.10.0")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 

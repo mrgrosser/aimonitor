@@ -1,0 +1,37 @@
+from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from app.report_charts import charts_html
+CHARTS=charts_html({"copilot_apps":[{"name":"Word","interactions":70},{"name":"Outlook","interactions":30}],"claude_products":[{"name":"Claude Code","spend":60},{"name":"Chat","spend":20}],"copilot_daily":[{"Date":f"2026-08-{i:02}","Interactions":i*5%37} for i in range(1,20)]})
+from playwright.sync_api import sync_playwright
+ROOT=Path(__file__).resolve().parents[1]/"app"/"static"
+def route_app(route):
+    path=route.request.url.split("monitor.test",1)[-1].split("?",1)[0]
+    if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"test"})
+    elif path=="/api/auth/me": route.fulfill(json={"pages":["reports"],"usage_import":False})
+    elif path=="/api/reports/executive/periods":route.fulfill(json={"data":[{"period":"August 2026"}]})
+    elif path=="/api/reports/executive":route.fulfill(json={"period":"August 2026","mode":"imported","source":"Monthly workbook","summary":{"copilot_active_users":10,"copilot_interactions":100,"claude_requests":20,"claude_usage_spend":3.5},"executive_sections":[{"name":"Department Summary","rows":[["Department","Users"],["<script>bad()</script>",2]]},{"name":"Daily trend","rows":[[str(i),i] for i in range(65)]}],"user_detail_included":False,"charts_html":CHARTS})
+    elif path.startswith("/api/"):route.fulfill(json={"data":[]})
+    else:
+        file=ROOT/("index.html" if path=="/" else path.removeprefix("/static/"))
+        route.fulfill(body=file.read_text(encoding="utf-8"),content_type={".html":"text/html",".js":"application/javascript",".css":"text/css"}.get(file.suffix,"text/plain"))
+with sync_playwright() as p:
+    browser=p.chromium.launch(channel="msedge",headless=True)
+    page=browser.new_page(viewport={"width":1440,"height":1000});errors=[]
+    page.on("pageerror",lambda e:errors.append(str(e)));page.route("http://monitor.test/**",route_app)
+    page.goto("http://monitor.test/#reports")
+    page.locator("#executiveSection").wait_for()
+    assert page.locator("#manageUsageImports").count()==0
+    assert page.locator("#evidenceNav").is_hidden()
+    assert page.locator("#executiveTable script").count()==0
+    assert "pseudonymized" in page.locator("#executiveReport").inner_text()
+    assert "format=xlsx" in page.get_by_text("Download Excel",exact=True).get_attribute("href")
+    page.locator("#executiveSection").select_option("1")
+    page.locator("#executiveNext").click()
+    assert page.locator("#executivePage").inner_text()=="31–60 of 65 rows"
+    page.locator("#executiveNext").click()
+    assert page.locator("#executiveNext").is_disabled()
+    assert page.locator(".report-chart").count()==3
+    assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
+    assert not errors,errors
+    browser.close();print("PASS: reports-only monthly preview, section pagination, download links, escaped content")
