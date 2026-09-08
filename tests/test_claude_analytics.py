@@ -13,7 +13,7 @@ class AnalyticsTests(unittest.IsolatedAsyncioTestCase):
             if 'user_usage' in request.url.path:
                 return httpx.Response(200,json={'data':[{'actor':{'user_id':'a'},'requests':2},{'actor':{'user_id':'b'},'requests':0}], 'has_more':False})
             cost='cost_report' in request.url.path
-            row={'amount':'12.34','currency':'USD'} if cost else {'requests':9}
+            row={'amount':'1234','currency':'USD'} if cost else {'requests':9}
             dimension=request.url.params.get('group_by[]')
             if dimension:row[dimension]='chat' if dimension=='product' else 'model';row['amount' if cost else 'requests']='1' if cost else 1
             return httpx.Response(200,json={'data':[{'starting_at':'2026-08-01T00:00:00Z','results':[row]}],'has_more':False})
@@ -73,3 +73,16 @@ class AnalyticsCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Unavailable',usage_html(data,'test','test'))
         workbook=load_workbook(io.BytesIO(executive_xlsx(data)))
         self.assertEqual(len(workbook['Claude Daily Trend']._charts),1)
+
+
+class CostUnitsTests(unittest.TestCase):
+    def test_fractional_cents_and_cached_repair(self):
+        from app.claude_analytics import total,normalize_cached
+        self.assertAlmostEqual(total([{'results':[{'amount':'95020.82','currency':'USD'}]}],'amount'),950.2082)
+        self.assertEqual(total([{'results':[{'requests':5547}]}],'requests'),5547)
+        data={'summary':{'claude_usage_spend':95020.82},'claude_products':[{'spend':63101.25}], 'executive_sections':[{'name':'AI Usage Summary','rows':[['Claude usage spend USD',95020.82]]},{'name':'Claude Product & Model','rows':[['Product','Requests','Spend'],['code',50,63101.25]]}]}
+        fixed=normalize_cached(data)
+        self.assertAlmostEqual(fixed['summary']['claude_usage_spend'],950.2082)
+        self.assertEqual(fixed['claude_products'][0]['spend'],631.0125)
+        self.assertEqual(fixed['executive_sections'][1]['rows'][1],["code",50,631.0125])
+        self.assertEqual(normalize_cached(fixed)['claude_products'][0]['spend'],631.0125)

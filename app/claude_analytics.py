@@ -30,7 +30,23 @@ def database():
 def saved(period=''):
     with closing(database()) as db:
         row=db.execute('SELECT payload FROM claude_analytics WHERE period=?',(period,)).fetchone() if period else db.execute('SELECT payload FROM claude_analytics ORDER BY period DESC LIMIT 1').fetchone()
-    return json.loads(row[0]) if row else None
+    return normalize_cached(json.loads(row[0])) if row else None
+
+def normalize_cached(data):
+    """v0.10.2 stored API cents as dollars; repair that known cache schema once."""
+    if data.get('cost_unit') == 'USD': return data
+    def dollars(value): return float(Decimal(str(value))/Decimal('100'))
+    summary=data.get('summary',{})
+    if 'claude_usage_spend' in summary: summary['claude_usage_spend']=dollars(summary['claude_usage_spend'])
+    for key in ('claude_products','claude_models'):
+        for row in data.get(key,[]):
+            if 'spend' in row:row['spend']=dollars(row['spend'])
+    for section in data.get('executive_sections',[]):
+        for row in section.get('rows',[]):
+            if row and row[0]=='Claude usage spend USD':row[1]=dollars(row[1])
+            elif section.get('name')=='Claude Product & Model' and len(row)>2 and isinstance(row[2],(int,float)):row[2]=dollars(row[2])
+    data['cost_unit']='USD'
+    return data
 
 def periods():
     with closing(database()) as db:
@@ -58,7 +74,7 @@ def total(buckets, field):
             amount=Decimal(str(row[field]))
             if not amount.is_finite(): raise ValueError('Invalid analytics number')
             value+=amount
-    return float(value)
+    return float(value / Decimal("100") if field == "amount" else value)
 
 def grouped(usage,cost,dimension):
     values={}
@@ -85,7 +101,7 @@ async def collect(client,start,end):
     tokens=sum(int(r.get(k,0)) for b in fetched['usage',''] for r in b['results'] for k in ('uncached_input_tokens','cache_read_input_tokens','output_tokens'))+sum(int(v) for b in fetched['usage',''] for r in b['results'] for v in (r.get('cache_creation') or {}).values())
     sections=[{'name':'Claude Product & Model','rows':[['Product','Requests','Spend']]+[[p['name'],p['requests'],p['spend']] for p in products]+[[],['Model','Requests','Spend']]+[[p['name'],p['requests'],p['spend']] for p in models]}, {'name':'Claude Daily Trend','rows':[['Date','Requests']]+[[r['Date'],r['Requests']] for r in daily]}]
     sections.insert(0,{'name':'AI Usage Summary','rows':[['Measure','Value'],['Claude active users',active_users],['Claude requests',total(fetched['usage',''],'requests')],['Claude tokens',tokens],['Claude usage spend USD',total(fetched['cost',''],'amount')],['Copilot usage','Not connected'],['Collected at',datetime.now(timezone.utc).isoformat()]]})
-    return {'period':start.strftime('%Y-%m'),'mode':'live','source':'Claude Enterprise Analytics API','collected_at':datetime.now(timezone.utc).isoformat(),'range_start':start.isoformat(),'range_end':end.isoformat(), 'summary':{'claude_active_users':active_users,'claude_tokens':tokens,'claude_requests':total(fetched['usage',''],'requests'),'claude_usage_spend':total(fetched['cost',''],'amount')},'licensing':{},'claude_products':products,'claude_models':models,'claude_daily':daily,'copilot_apps':[],'top_users':[],'executive_sections':sections,'caveats':['Copilot usage is not connected. Evidence counts are not usage totals.','Spend is reported USD usage cost, excluding seat fees.','Product/model breakdowns are limited by the provider to the top 100 groups per day; headline totals use ungrouped results.','Current month is month-to-date; provider analytics may lag recent activity.']}
+    return {'cost_unit':'USD','period':start.strftime('%Y-%m'),'mode':'live','source':'Claude Enterprise Analytics API','collected_at':datetime.now(timezone.utc).isoformat(),'range_start':start.isoformat(),'range_end':end.isoformat(), 'summary':{'claude_active_users':active_users,'claude_tokens':tokens,'claude_requests':total(fetched['usage',''],'requests'),'claude_usage_spend':total(fetched['cost',''],'amount')},'licensing':{},'claude_products':products,'claude_models':models,'claude_daily':daily,'copilot_apps':[],'top_users':[],'executive_sections':sections,'caveats':['Copilot usage is not connected. Evidence counts are not usage totals.','Spend is reported USD usage cost, excluding seat fees.','Product/model breakdowns are limited by the provider to the top 100 groups per day; headline totals use ungrouped results.','Current month is month-to-date; provider analytics may lag recent activity.']}
 
 async def run(key,base_url):
     while True:

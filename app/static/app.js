@@ -73,7 +73,7 @@ window.addEventListener('hashchange',activateRoute);
 (async()=>{configureTheme();await configureAuth();try{const me=await api('/api/auth/me');configureAccess(me);showApp();if((me.pages||[]).includes('evidence'))await load();activateRoute()}catch{showLogin()}})();
 
 async function openExecutiveReports(usagePage=false){
- openInfo(usagePage?'usageNav':'reportsNav','LEADERSHIP REPORTING',usagePage?'Usage & spend':'Reports','Automatic monthly analytics');
+ openInfo(usagePage?'usageNav':'reportsNav','USAGE REPORTING',usagePage?'Usage & spend':'Reports','Automatic monthly analytics');
  try{
   const response=await api(usagePage?'/api/usage/periods':'/api/reports/executive/periods');const periods=response.data||[];
   $('#infoBody').innerHTML=`<div class="usage-tools"><label>Reporting period<select id="executivePeriod">${periods.map(p=>`<option value="${esc(p.period)}">${esc(p.period)}</option>`).join('')}</select></label><div class="usage-actions"><button id="complianceReports">Compliance reports</button><button id="refreshAnalytics">Refresh view</button></div></div><p>${esc(response.analytics_status?.message||'')}</p><div id="executiveReport"></div>`;
