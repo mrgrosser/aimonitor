@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import sqlite3
+from urllib.parse import urlparse
 import httpx
 from app import usage_reporting
 from app.compliance_http import compliance_gate
@@ -51,6 +52,15 @@ async def fetch(client,token,days,trend=False):
     method='getMicrosoft365CopilotUserCountTrend' if trend else 'getMicrosoft365CopilotUserCountSummary'
     url=f"https://graph.microsoft.com/v1.0/copilot/reports/{method}(period='D{days}')"
     response=await compliance_gate().get(client,url,headers={'Authorization':f'Bearer {token}'},params={'$format':'text/csv'})
+    if response.status_code == 302:
+        # Graph report URLs are preauthenticated. Never forward the bearer token.
+        location=response.headers.get('location','')
+        target=urlparse(location)
+        host=(target.hostname or '').lower()
+        if target.scheme!='https' or target.username or target.password or target.port not in (None,443) or not (host=='reports.office.com' or host.endswith('.reports.office.com')):
+            raise ValueError('Unexpected Microsoft report download host')
+        async with httpx.AsyncClient(timeout=60,follow_redirects=False) as download:
+            response=await compliance_gate().get(download,location)
     response.raise_for_status()
     rows=parse(response,trend)
     if not rows:raise ValueError('Empty Microsoft usage report')

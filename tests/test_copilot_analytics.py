@@ -76,3 +76,22 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_non_json_response(self):
         self.assertIn('non-JSON',analytics.error_detail(httpx.Response(400,text='<html>error</html>')))
+
+
+class RedirectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_download_redirect_does_not_forward_token(self):
+        downloads=[]
+        def download(request):
+            downloads.append(request)
+            return httpx.Response(200,text='Report Refresh Date,Report Period,Any App Active Users,Any App Enabled Users\n2026-09-06,30,8,12\n',headers={'content-type':'text/csv'})
+        download_client=httpx.AsyncClient(transport=httpx.MockTransport(download))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(302,headers={'location':'https://reports.office.com/data/download/example'}))) as client:
+            with patch.object(analytics.httpx,'AsyncClient',return_value=download_client),patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
+                rows=await analytics.fetch(client,'secret-token',30)
+        self.assertEqual(rows[0]['anyAppActiveUsers'],'8')
+        self.assertNotIn('authorization',downloads[0].headers)
+
+    async def test_unexpected_redirect_is_rejected(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(302,headers={'location':'https://example.com/download'}))) as client:
+            with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
+                with self.assertRaises(ValueError):await analytics.fetch(client,'secret-token',30)
