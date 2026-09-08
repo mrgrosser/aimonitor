@@ -46,6 +46,15 @@ class FindingStoreTests(unittest.TestCase):
         governance.record_suppressed(self.item, "anthropic")
         self.assertEqual(finding_store.known_versions()["claude_chat_1"], ("2026-09-01T12:05:00Z", "rules-2026.08.2"))
 
+    def test_legacy_copilot_html_reprocessed_without_timestamp_change(self):
+        self.item.update(kind="copilot",provider="m365")
+        governance.score_evidence(self.item)
+        finding_store.upsert_finding(self.item,"m365")
+        self.assertEqual(finding_store.known_versions()[self.item["id"]],("",""))
+        self.item["messages"][0]["raw_body"]={"contentType":"text","content":self.item["messages"][0]["text"]}
+        finding_store.upsert_finding(self.item,"m365")
+        self.assertEqual(finding_store.known_versions()[self.item["id"]],(self.item["updated_at"],self.item["risk_rule_version"]))
+
     def test_prune_respects_retention_window(self):
         governance.score_evidence(self.item)
         finding_store.upsert_finding(self.item, "anthropic")

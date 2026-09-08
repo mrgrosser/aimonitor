@@ -77,6 +77,11 @@ def known_versions() -> dict[str, tuple[str, str]]:
             if any(not isinstance(message.get("text", ""), str) for message in json.loads(evidence).get("messages", [])):
                 result[id_] = ("", "")
                 continue
+            retained=json.loads(evidence)
+            if retained.get("provider") == "m365" and any("raw_body" not in message for message in retained.get("messages", [])):
+                # Reprocess legacy Graph HTML even when the upstream timestamp is unchanged.
+                result[id_] = ("", "")
+                continue
             result[id_]=(updated or "",version)
         try:
             for id_,updated,version,recheck,pipeline in db.execute("SELECT evidence_id,updated_at,rule_version,recheck_at,pipeline_version FROM suppressed_evidence"):

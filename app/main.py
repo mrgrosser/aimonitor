@@ -39,7 +39,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.9.8")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.9")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -71,7 +71,7 @@ M365_TENANT = os.getenv("M365_COPILOT_TENANT_ID", "").strip()
 M365_CLIENT = os.getenv("M365_COPILOT_CLIENT_ID", "").strip()
 M365_SECRET = os.getenv("M365_COPILOT_CLIENT_SECRET", "").strip()
 M365_USERS = [x.strip() for x in os.getenv("M365_COPILOT_USER_IDS", "").split(",") if x.strip()]
-M365_MAX_USERS = max(0, int(os.getenv("M365_COPILOT_MAX_USERS", "100")))
+M365_MAX_USERS = max(0, int(os.getenv("M365_COPILOT_MAX_USERS", "").strip() or "100"))
 M365_ENABLED = all((M365_TENANT, M365_CLIENT, M365_SECRET))
 _refuse_insecure_live_config()
 CASE_READ_ROLES = {x.strip() for x in os.getenv("CASE_READ_ROLES","Compliance.Admin,Compliance.Investigator,Compliance.Reviewer,Compliance.Auditor").split(",") if x.strip()}
