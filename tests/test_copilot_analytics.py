@@ -48,3 +48,15 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
         with patch.object(analytics,'fetch',AsyncMock(side_effect=[[{'reportPeriod':30,'reportRefreshDate':'2026-09-06'}],[{'reportPeriod':30,'reportRefreshDate':'2026-09-05'}]])):
             with self.assertRaises(ValueError):await analytics.collect(None,'test',30)
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_microsoft_diagnostic_contains_explanation_and_request_id(self):
+        response=httpx.Response(400,json={'error':{'code':'BadRequest','message':'Unsupported report parameter'}},headers={'request-id':'request-123'})
+        detail=analytics.error_detail(response)
+        self.assertIn('Unsupported report parameter',detail)
+        self.assertIn('request-123',detail)
+        self.assertIn('BadRequest',detail)
+
+    def test_non_json_response(self):
+        self.assertIn('non-JSON',analytics.error_detail(httpx.Response(400,text='<html>error</html>')))

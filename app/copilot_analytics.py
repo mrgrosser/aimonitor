@@ -71,6 +71,17 @@ async def collect(client,token,days):
     daily=[{'Date':datetime.fromisoformat(r['reportDate']).date().isoformat(),'Active users':count(r['anyAppActiveUsers'])} for r in trend]
     return {'mode':'live','period':f'Copilot - last {days} days','source':f'Microsoft Graph Copilot adoption · {days}-day window · Microsoft refreshed {refresh}','collected_at':datetime.now(timezone.utc).isoformat(),'report_refresh_date':refresh,'summary':{'copilot_active_users':active,'copilot_enabled_users':enabled},'licensing':{},'copilot_adoption':apps,'copilot_user_trend':daily,'copilot_apps':[],'claude_products':[],'claude_models':[],'top_users':[],'executive_sections':[{'name':'Copilot adoption summary','rows':[['Measure','Value'],['Rolling window days',days],['Microsoft refresh date',refresh],['Active users',active],['Enabled users',enabled]]},{'name':'Copilot users by app','rows':[['App','Active users','Enabled users']]+[[r['name'],r['users'],r['enabled']] for r in apps]},{'name':'Copilot active user trend','rows':[['Date','Active users']]+[[r['Date'],r['Active users']] for r in daily]}],'caveats':['Microsoft reports a rolling window, not a calendar month.','Counts are active users, not prompts or interactions. Users can use multiple apps; do not sum app counts.','This source reports enabled Microsoft 365 Copilot adoption; it is not a complete Purview audit of every unlicensed Copilot Chat interaction.','Microsoft report refresh dates can lag collection time. No usage price or seat cost is supplied.']}
 
+def error_detail(response):
+    """Retain Microsoft's diagnostic text, never request headers or credentials."""
+    try:
+        error=response.json().get('error',{})
+        code=str(error.get('code',''))[:100]
+        message=str(error.get('message',''))[:700]
+    except (ValueError,AttributeError):
+        code='';message='Microsoft returned a non-JSON error response.'
+    request_id=response.headers.get('request-id','')[:100]
+    return f"{code}: {message}" + (f" (request ID: {request_id})" if request_id else '')
+
 async def run(token_provider):
     while True:
         status.update(state='syncing',message='Collecting Microsoft Copilot usage')
@@ -85,7 +96,10 @@ async def run(token_provider):
             status.update(state='ready',message='Copilot usage collection succeeded')
         except httpx.HTTPStatusError as exc:
             code=exc.response.status_code
-            status.update(state='error',message=f'Copilot usage HTTP {code}. '+('Grant Microsoft Graph application Reports.Read.All and admin consent.' if code in (401,403) else 'Previous results retained; collection will retry.'))
+            from app.governance import audit
+            detail=error_detail(exc.response)
+            audit('system','copilot_usage_failed','usage_report',details={'status':code,'diagnostic':detail})
+            status.update(state='error',message=f'Copilot usage HTTP {code}. '+('Grant Microsoft Graph application Reports.Read.All and admin consent.' if code in (401,403) else 'Previous results retained; collection will retry.')+' '+detail)
         except Exception:
             status.update(state='error',message='Copilot usage collection failed; previous results retained. Check Microsoft credentials and reporting availability.')
         await sleep(21600)

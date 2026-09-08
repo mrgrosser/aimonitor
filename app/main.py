@@ -40,7 +40,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.10.3")
+APP_VERSION = os.getenv("APP_VERSION", "0.10.4")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -1069,7 +1069,7 @@ def usage_periods(request: Request, user: str = Depends(current_user)):
             "source_hash":"demo","imported_at":None,"imported_by":"system","copilot_interactions":s["copilot_interactions"],
             "claude_requests":s["claude_requests"],"claude_usage_spend":s["claude_usage_spend"]})
     audit(user,"usage_periods_viewed","usage_analytics",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"periods":len(periods)})
-    return {"data":periods,"analytics_status":{"message":claude_analytics.status["message"]+" · "+copilot_analytics.status["message"]}}
+    return {"data":periods,"current_month":datetime.now(timezone.utc).strftime("%Y-%m"),"analytics_status":{"message":claude_analytics.status["message"]+" · "+copilot_analytics.status["message"]}}
 
 @app.post("/api/usage/import/preview")
 async def usage_import_preview(request: Request, file: UploadFile = File(...), user: str = Depends(usage_importer)):
