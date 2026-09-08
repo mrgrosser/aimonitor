@@ -25,7 +25,7 @@ with sync_playwright() as p:
     assert page.locator("#manageUsageImports").count()==0
     assert page.locator("#evidenceNav").is_hidden()
     assert page.locator("#executiveTable script").count()==0
-    assert "pseudonymized" in page.locator("#executiveReport").inner_text()
+    assert "pseudonymized" not in page.locator("#executiveReport").inner_text()
     assert "format=xlsx" in page.get_by_text("Download Excel",exact=True).get_attribute("href")
     page.locator("#executiveSection").select_option("1")
     page.locator("#executiveNext").click()
@@ -34,12 +34,21 @@ with sync_playwright() as p:
     assert page.locator("#executiveNext").is_disabled()
     assert page.locator(".report-chart").count()==3
     assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
-    assert page.locator("#executivePeriod option").all_text_contents()==["2026-08"]
+    assert page.locator("#executivePeriod option").all_text_contents()==["August 2026"]
+    assert page.locator("#executiveReport h3").first.inner_text()=="Claude"
+    assert page.locator("#executiveReport").get_attribute("data-provider")=="claude"
     page.evaluate("openExecutiveReports(true)")
     page.wait_for_function("document.querySelector('#executivePeriod')?.value==='2026-09'")
-    assert page.locator("#executivePeriod option").all_text_contents()==["2026-09","Copilot - last 30 days"]
+    assert page.locator("#executivePeriod option").all_text_contents()==["September 2026","Copilot - last 30 days"]
     page.locator("#viewCopilotDetail").wait_for()
+    assert page.locator("#executiveReport h3").first.inner_text()=="Claude"
+    assert page.locator("#executiveReport").evaluate("e=>getComputedStyle(e).getPropertyValue('--report-accent').trim()") == "#b65335"
     assert "Active users" in page.locator("#copilotOverview").inner_text()
     assert "8" in page.locator("#copilotOverview").inner_text()
+    page.locator("#viewCopilotDetail").click()
+    page.wait_for_function("document.querySelector('#executiveReport')?.dataset.provider==='copilot'")
+    assert page.locator("#copilotOverview").is_hidden()
+    page.evaluate("document.documentElement.setAttribute('data-theme','dark')")
+    assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
     assert not errors,errors
     browser.close();print("PASS: reports-only monthly preview, section pagination, download links, escaped content")

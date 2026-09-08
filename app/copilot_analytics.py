@@ -1,7 +1,7 @@
 """Microsoft Graph Copilot adoption reports, collected without user enumeration."""
 from asyncio import sleep
 from contextlib import closing
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 import csv
 import io
 import json
@@ -129,4 +129,5 @@ async def run(token_provider):
             logging.getLogger(__name__).error('copilot_usage_failed: %s',detail)
             audit('system','copilot_usage_failed','usage_report',details={'error_type':type(exc).__name__,'diagnostic':detail})
             status.update(state='error',message='Copilot usage failed: '+detail+'. Previous results retained; collection will retry.')
+        status["next_refresh_at"]=(datetime.now(timezone.utc)+timedelta(seconds=21600)).isoformat()
         await sleep(21600)

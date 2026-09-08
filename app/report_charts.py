@@ -5,6 +5,9 @@ from datetime import datetime
 
 COLORS=["#3865e8","#23988d","#d2993b","#9066b5","#708398","#b4bfcd"]
 
+def accent(data):
+    return "#14877f" if str(data.get('period','')).startswith('Copilot - ') else "#c56645"
+
 def series(data):
     def positive(rows,label,value):
         result=[]
@@ -53,7 +56,7 @@ def charts_html(data):
         maximum=max(v for _,v in spend)
         bars=''.join(f'<div class="chart-bar"><span>{html.escape(name)}</span><div><i style="width:{value/maximum*100:.2f}%"></i></div><b>${value:,.2f}</b></div>' for name,value in spend)
         card("Claude spend by product",bars,"Reported usage spend in USD; seat fees excluded")
-    return '<div class="report-charts">'+''.join(cards)+'</div>' if cards else ''
+    return ('<div class="report-charts" style="--chart-accent:'+accent(data)+'">'+''.join(cards)+'</div>').replace('#3865e8',accent(data)) if cards else ''
 
 
 def pdf_charts(data):
@@ -61,7 +64,7 @@ def pdf_charts(data):
     from reportlab.graphics.charts.piecharts import Pie
     from reportlab.lib.colors import HexColor
     apps,daily,spend=series(data); drawings=[]
-    ink=HexColor("#243F65");blue=HexColor(COLORS[0])
+    ink=HexColor("#243F65");blue=HexColor(accent(data))
     if apps:
         d=Drawing(450,185);d.add(String(0,170,"Copilot app mix - interactions",fontSize=12,fill=ink))
         pie=Pie();pie.x=5;pie.y=10;pie.width=140;pie.height=140;pie.data=[v for _,v in apps];pie.labels=[]
@@ -89,7 +92,7 @@ def pdf_charts(data):
     return drawings
 
 
-CHART_CSS=""".report-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:22px 0}.report-chart{border:1px solid #dce3ec;border-radius:10px;padding:18px;min-width:0;break-inside:avoid}.report-chart h3{font-size:15px;margin:0 0 16px}.report-chart p{font-size:12px;color:#758194}.report-chart svg{width:100%;max-height:210px}.chart-mix{display:flex;align-items:center;gap:12px}.chart-mix svg{width:45%;flex-shrink:0}.chart-mix ul{list-style:none;padding:0;font-size:11px;flex:1}.chart-mix li{margin:8px 0}.chart-mix b{white-space:nowrap}.chart-bar{display:grid;grid-template-columns:minmax(70px,1fr) 1.3fr auto;gap:8px;align-items:center;margin:14px 0;font-size:12px}.chart-bar>div{background:#e8edf5;height:10px;border-radius:4px;overflow:hidden}.chart-bar i{display:block;height:100%;background:#3865e8}.chart-bar b{font-variant-numeric:tabular-nums}@media print{.report-charts{display:block}.report-chart{margin:12px 0}.report-chart svg{max-width:500px}}"""
+CHART_CSS=""".report-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:22px 0}.report-chart{border:1px solid #dce3ec;border-radius:10px;padding:18px;min-width:0;break-inside:avoid}.report-chart h3{font-size:15px;margin:0 0 16px}.report-chart p{font-size:12px;color:#758194}.report-chart svg{width:100%;max-height:210px}.chart-mix{display:flex;align-items:center;gap:12px}.chart-mix svg{width:45%;flex-shrink:0}.chart-mix ul{list-style:none;padding:0;font-size:11px;flex:1}.chart-mix li{margin:8px 0}.chart-mix b{white-space:nowrap}.chart-bar{display:grid;grid-template-columns:minmax(70px,1fr) 1.3fr auto;gap:8px;align-items:center;margin:14px 0;font-size:12px}.chart-bar>div{background:#e8edf5;height:10px;border-radius:4px;overflow:hidden}.chart-bar i{display:block;height:100%;background:var(--chart-accent,#3865e8)}.chart-bar b{font-variant-numeric:tabular-nums}@media print{.report-charts{display:block}.report-chart{margin:12px 0}.report-chart svg{max-width:500px}}"""
 
 
 def excel_charts(workbook):
@@ -108,6 +111,10 @@ def excel_charts(workbook):
         chart=DoughnutChart() if kind=="pie" else LineChart() if kind=="line" else BarChart()
         chart.title=title;chart.style=13;chart.width=23;chart.height=12
         chart.add_data(Reference(sheet,min_col=col,min_row=start,max_row=end),titles_from_data=True)
+        color="14877F" if name.startswith("Copilot") else "C56645"
+        for item in chart.series:
+            item.graphicalProperties.line.solidFill=color
+            if kind in ("bar","users"):item.graphicalProperties.solidFill=color
         chart.set_categories(Reference(sheet,min_col=1,min_row=start+1,max_row=end))
         if kind=="pie":chart.holeSize=65
         else:

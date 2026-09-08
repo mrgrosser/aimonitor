@@ -40,3 +40,19 @@
 [data-theme="dark"] #copilotOverview{--report-accent:#62cbb8}
 [data-theme="dark"] #viewCopilotDetail{color:#101821}
 @media(max-width:600px){#executiveReport>.usage-panel,#copilotOverview>.usage-panel{padding:16px}.usage-heading{align-items:flex-start;gap:12px;flex-direction:column}}
+
+/* Provider identity is shared by current usage and historical reports. */
+#executiveReport[data-provider="claude"]{--report-accent:#b65335}
+#executiveReport[data-provider="claude"] .usage-kpi,#executiveReport[data-provider="claude"] .report-chart{background:linear-gradient(135deg,#fff2eb,#fff)}
+#executiveReport[data-provider="claude"] .chart-bar i{background:linear-gradient(90deg,#c56645,#e6a080)}
+#executiveReport[data-provider="claude"] .report-chart svg polyline{stroke:#c56645}
+#executiveReport[data-provider="claude"] .report-chart svg circle[fill="#3865e8"]{fill:#c56645}
+#executiveReport[data-provider="copilot"]{--report-accent:#14877f}
+#executiveReport[data-provider="copilot"] .chart-bar i{background:linear-gradient(90deg,#14877f,#48b6a5)}
+#copilotOverview .report-chart svg polyline,#executiveReport[data-provider="copilot"] .report-chart svg polyline{stroke:#14877f}
+#copilotOverview .report-chart svg circle[fill="#3865e8"],#executiveReport[data-provider="copilot"] .report-chart svg circle[fill="#3865e8"]{fill:#14877f}
+[data-theme="dark"] #executiveReport[data-provider="claude"]{--report-accent:#efa584}
+[data-theme="dark"] #executiveReport[data-provider="claude"] .usage-kpi,[data-theme="dark"] #executiveReport[data-provider="claude"] .report-chart{background:linear-gradient(135deg,#32251f,#182330)}
+[data-theme="dark"] #executiveReport[data-provider="copilot"]{--report-accent:#62cbb8}
+
+.report-notes{margin:18px 0;color:var(--muted);font-size:12px}.report-notes summary{cursor:pointer;font-weight:600}.report-notes li{margin:7px 0}.report-freshness{color:var(--muted);font-size:12px}

@@ -123,4 +123,5 @@ async def run(key,base_url):
             status.update(state='error',message=f'Claude analytics HTTP {code}. '+('Check read:analytics permission on the configured key.' if code in (401,403) else 'Collection will retry; previous results are retained.'))
         except Exception:
             status.update(state='error',message='Claude analytics collection failed; previous results retained. Collection will retry.')
+        status["next_refresh_at"]=(datetime.now(timezone.utc)+timedelta(seconds=3600)).isoformat()
         await sleep(3600)

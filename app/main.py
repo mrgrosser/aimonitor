@@ -40,7 +40,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.10.9")
+APP_VERSION = os.getenv("APP_VERSION", "0.10.10")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -1017,6 +1017,13 @@ def usage_importer(request: Request) -> str:
 
 
 def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]:
+    labels={"claude_code":"Claude Code","chat":"Claude Chat","cowork":"Cowork","office_agent":"Office Agents"}
+    def display(value):
+        if isinstance(value,dict):return {k:display(v) for k,v in value.items()}
+        if isinstance(value,list):return [display(v) for v in value]
+        if isinstance(value,str):return labels.get(value,value)
+        return value
+    data=display(data)
     identity=current_identity(request); named=identity["method"]=="local" or bool(identity["roles"] & USAGE_USER_ROLES)
     if not named:
         from app.usage_reporting import _alias
