@@ -1,3 +1,4 @@
+from .compliance_http import compliance_gate
 import base64
 import asyncio
 import hashlib
@@ -37,7 +38,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.9.7")
+APP_VERSION = os.getenv("APP_VERSION", "0.9.8")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -376,7 +377,7 @@ async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) 
     if DEMO: return {"data": []}
     if not API_KEY: raise HTTPException(503, "Claude Compliance API is not configured")
     async with httpx.AsyncClient(timeout=30) as client:
-        res = await client.get(f"{BASE_URL}{path}", params=params, headers={"x-api-key": API_KEY})
+        res = await compliance_gate().get(client, f"{BASE_URL}{path}", params=params, headers={"x-api-key": API_KEY})
     if res.status_code >= 400:
         raise HTTPException(res.status_code, f"Claude Compliance API returned HTTP {res.status_code}")
     return res.json()
@@ -518,6 +519,9 @@ async def sync_provider_findings() -> dict[str, int]:
 
 async def _sync_provider_findings() -> dict[str, int]:
     pruned = await asyncio.to_thread(prune_findings)
+    # Rescore retained evidence before network access; below-threshold records are preserved.
+    rescored = await asyncio.to_thread(rescore_findings, stale_only=True)
+    if any(rescored.values()): audit("system", "findings_rescored", "findings", details=rescored)
     expired = await asyncio.to_thread(expired_finding_ids)
     chats,local,remote=await _live_index() if API_KEY else ([],[],[]); index=chats+local+remote
     if M365_ENABLED: index+=await m365_cases()

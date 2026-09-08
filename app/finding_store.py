@@ -37,10 +37,10 @@ def upsert_finding(item: dict[str, Any], provider: str) -> bool:
             return False
         row=db.execute("SELECT first_seen_at FROM findings WHERE id=?",(item.get("id"),)).fetchone()
         db.execute("""INSERT OR REPLACE INTO findings(id,provider,surface,user_id,user_email,title,created_at,updated_at,
-            first_seen_at,last_seen_at,risk,risk_score,policy_version,promoted,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+            first_seen_at,last_seen_at,risk,risk_score,policy_version,promoted,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item.get("id"),provider,item.get("surface"),user.get("id"),user.get("email"),item.get("title"),
              item.get("created_at"),item.get("updated_at"),row[0] if row else now,now,item.get("risk"),
-             int(item.get("risk_score") or 0),item.get("risk_rule_version") or "unknown",json.dumps(item,separators=(",",":"))))
+             int(item.get("risk_score") or 0),item.get("risk_rule_version") or "unknown",int(item.get("promoted",True)),json.dumps(item,separators=(",",":"))))
         db.commit()
     return row is None
 
@@ -57,10 +57,10 @@ def get_finding(finding_id: str) -> dict[str, Any] | None:
     return json.loads(row[0]) if row else None
 
 
-def list_findings() -> list[dict[str, Any]]:
+def list_findings(include_suppressed: bool = False) -> list[dict[str, Any]]:
     init_finding_db()
     with closing(sqlite3.connect(DB_PATH)) as db:
-        rows=db.execute("SELECT evidence_json FROM findings WHERE promoted=1 ORDER BY created_at DESC").fetchall()
+        rows=db.execute("SELECT evidence_json FROM findings" + ("" if include_suppressed else " WHERE promoted=1") + " ORDER BY created_at DESC").fetchall()
     return [json.loads(x[0]) for x in rows]
 
 
@@ -118,14 +118,18 @@ def prune_findings(retention_days: int | None = None) -> int:
     return cur.rowcount
 
 
-def rescore_findings() -> dict[str, int]:
+def rescore_findings(stale_only: bool = False) -> dict[str, int]:
     """Re-evaluate every stored finding against the active policy. Findings that fall below
-    the threshold move to suppressed metadata and their retained evidence is deleted."""
+    the threshold leave the queue; their evidence remains available until retention expiry."""
     from app.governance import record_suppressed, score_evidence
     counts={"rescored":0,"suppressed":0}
-    for item in list_findings():
+    for item in list_findings(include_suppressed=True):
+        if stale_only and item.get("risk_pipeline_version") == PIPELINE_VERSION: continue
         provider="m365" if item.get("kind")=="copilot" else "anthropic"
         score_evidence(item)
         if item["promoted"]: upsert_finding(item,provider); counts["rescored"]+=1
-        else: record_suppressed(item,provider); delete_finding(str(item.get("id"))); counts["suppressed"]+=1
+        else:
+            record_suppressed(item,provider)
+            upsert_finding(item,provider)
+            counts["suppressed"]+=1
     return counts

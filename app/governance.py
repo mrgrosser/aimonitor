@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PIPELINE_VERSION = "ingestion-2026.09.2"
+PIPELINE_VERSION = "ingestion-2026.09.3"
 DB_PATH = Path(os.getenv("DATABASE_PATH", "data/jo-ai-monitor.db"))
 FINDING_THRESHOLD = max(0, min(int(os.getenv("RISK_FINDING_THRESHOLD", "40")), 100))
 _lock = threading.Lock()
@@ -88,26 +88,49 @@ def verify_chain() -> bool:
         previous=r[9]
     return True
 
+def user_text(value: Any) -> str:
+    """Only explicit text blocks; tool results may arrive inside a user envelope."""
+    if isinstance(value, str): return value
+    if isinstance(value, list): return "\n".join(filter(None, (user_text(part) for part in value)))
+    if isinstance(value, dict) and value.get("type", "text") in {"text", "input_text"}:
+        return user_text(value.get("text", ""))
+    return ""
+
+
 def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
     from app.policy_management import active_policy
     policy=active_policy(); rules=policy["rules"]; bands=policy["severity_bands"]
     # Also normalize retained evidence written before provider metadata was introduced.
     item["provider"] = item.get("provider") or ("m365" if item.get("kind") == "copilot" else "anthropic")
-    parts=[item.get("title",""),item.get("summary","")]
-    for msg in item.get("messages",[]) or []: parts.append(str(msg.get("text") or msg.get("content") or ""))
-    for ctx in item.get("contexts",[]) or []: parts.extend((str(ctx.get("displayName","")),str(ctx.get("contextType",""))))
-    text=" ".join(parts).lower(); factors=[]; score=0
+    parts=[]
+    for msg in item.get("messages",[]) or []:
+        role=str(msg.get("source_role") or msg.get("role") or msg.get("sender") or "").casefold()
+        if role not in {"human", "user"}: continue
+        if msg.get("type") in {"tool_result", "tool_use", "tool"}: continue
+        # Preserve block provenance instead of scoring the flattened display text.
+        content=msg.get("content")
+        value=content if isinstance(content,(list,dict)) else msg.get("text") or content or ""
+        text_part=user_text(value)
+        if text_part.strip(): parts.append(text_part)
+    factors=[]; score=0; notes=[]
+    if not parts: notes.append("No user-authored text available for scoring.")
     for rule in rules:
-        if rule.get("enabled",True) and re.search(rule["pattern"],text,re.I):
-            score+=int(rule["points"]); factors.append({"id":rule["id"],"points":int(rule["points"])})
+        if rule.get("enabled",True) and any(re.search(rule["pattern"],part,re.I) for part in parts):
+            score+=int(rule["points"]); factors.append({"id":rule["id"],"points":int(rule["points"]),"source":"user_text"})
     controls=policy.get("controls") or {}; user=item.get("user") or {}; groups=[str(x).casefold() for x in (user.get("groups") or item.get("groups") or [])]
-    app_request=bool(re.search(str(controls.get("app_generation_pattern") or r"$^"),text,re.I))
+    app_request=any(re.search(str(controls.get("app_generation_pattern") or r"$^"),part,re.I) for part in parts)
     it_values={str(x).casefold() for x in controls.get("it_group_values",[])}
     is_it=bool(it_values.intersection(groups)) or str(user.get("department") or item.get("business_unit") or "").casefold() in it_values
+    identity_known=bool(groups or user.get("department") or item.get("business_unit"))
     approved=bool(item.get("approval_id") or item.get("approved_workflow"))
-    if app_request and controls.get("only_it_can_generate_apps",True) and not is_it:
+    approval_known=approved or item.get("approved_workflow") is False
+    if app_request and controls.get("only_it_can_generate_apps",True) and not identity_known:
+        notes.append("IT authorization unknown: directory group/department data is unavailable.")
+    if app_request and controls.get("app_generation_requires_approval",True) and not approval_known:
+        notes.append("Workflow approval unknown: approval data is unavailable.")
+    if app_request and controls.get("only_it_can_generate_apps",True) and identity_known and not is_it:
         score+=60; factors.append({"id":"unauthorized_app_generation","points":60})
-    if app_request and controls.get("app_generation_requires_approval",True) and not approved:
+    if app_request and controls.get("app_generation_requires_approval",True) and approval_known and not approved:
         score+=40; factors.append({"id":"app_generation_without_approval","points":40})
     now=datetime.now(timezone.utc); exception=None
     for candidate in policy.get("exceptions") or []:
@@ -128,7 +151,7 @@ def score_evidence(item: dict[str,Any]) -> dict[str,Any]:
         if all(not scope.get(key) or str(scope[key]).casefold()==str(context.get(key) or "").casefold() for key in context): matching.append(scope)
     if matching: threshold=max(int(scope["finding_threshold"]) for scope in matching)
     score=min(score,100); severity="critical" if score>=bands["critical"] else "high" if score>=bands["high"] else "medium" if score>=bands["medium"] else "low" if score>=bands["low"] else "informational"
-    item.update(risk_pipeline_version=PIPELINE_VERSION,risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
+    item.update(risk_scoring_basis="user_text",risk_review_notes=notes,risk_pipeline_version=PIPELINE_VERSION,risk=severity,risk_score=score,risk_factors=factors,risk_rule_version=policy["version"],risk_threshold=threshold,
         risk_scope_ids=[scope["id"] for scope in matching],policy_exception_id=exception.get("id") if exception else None,
         risk_recheck_at=exception.get("expires_at") if exception else None,
         promoted=score>=threshold and exception is None)

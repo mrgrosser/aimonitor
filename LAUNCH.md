@@ -35,3 +35,13 @@ The current live normalizers supply user ID and email, not organizational group 
 - Dependency audit with `pip-audit -r requirements.txt`; vulnerable web/auth/upload pins updated. A clean dependency audit is not a penetration test or a validation of tenant configuration.
 
 Provider contracts checked against the [Claude chat messages API](https://platform.claude.com/docs/en/api/http/compliance/apps/chats/messages/list), [Claude remote session messages API](https://platform.claude.com/docs/en/api/http/compliance/apps/sessions/remote/messages/list), and [Microsoft Copilot interaction export API](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/api/ai-services/interaction-export/aiinteractionhistory-getallenterpriseinteractions).
+
+### Claude throttling
+
+Claude requests share a per-process gate with at least 250 ms between attempts. HTTP 429 responses apply a shared cooldown using `Retry-After` (seconds or HTTP date), with exponential fallback and up to five retries of the same request. Exhausted requests remain incomplete and are retried by a later sync. Access audit exposes the status and diagnostic details. Other deployments sharing the organization quota can still cause throttling; this gate is not distributed across replicas.
+
+### Scoring correction (0.9.8)
+
+Risk indicators use user-authored text only. Assistant output, tool blocks, generated titles, summaries, and resource labels do not contribute to the user score. Missing department/groups or workflow approval are unknown, not violations; explicit `approved_workflow=false` represents an unapproved workflow. This remains keyword screening for analyst review, not a determination of intent or a confirmed incident. Unknown roles and non-text attachments are not scored.
+
+At the next sync, retained evidence with an older scoring pipeline is rescored before provider requests. Below-threshold records leave the queue but retain their transcript and original retention clock. Existing investigation snapshots and historical alerts remain historical records. Suppressed metadata from older pipelines is reevaluated when provider content is fetched successfully.

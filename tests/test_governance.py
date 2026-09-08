@@ -24,7 +24,7 @@ class GovernanceScoringTests(unittest.TestCase):
         self.assertEqual({x["id"] for x in result["risk_factors"]}, {"unauthorized_access","evasion","production_target"})
 
     def test_inflected_exfiltration_and_escalation_terms_match(self):
-        item = {"title":"Privilege escalation","summary":"Exfiltrating API keys from production","messages":[]}
+        item = {"title":"Privilege escalation","summary":"Exfiltrating API keys from production","messages":[{"role":"human","text":"hack root access in production; exfiltrating API keys"}]}
         result = score_evidence(item)
         self.assertGreaterEqual(result["risk_score"], 80)
         self.assertIn("data_exfiltration", {x["id"] for x in result["risk_factors"]})
@@ -38,17 +38,17 @@ class GovernanceScoringTests(unittest.TestCase):
         approved=policy_management.approve_policy(updated["id"],"reviewer","Reviewed test policy")
         active=policy_management.activate_policy(approved["id"],"admin","Activate approved test")
         self.assertEqual(active["status"],"active")
-        scored=score_evidence({"title":"hack root access","summary":"","messages":[]})
+        scored=score_evidence({"title":"hack root access","summary":"","messages":[{"role":"human","text":"hack root access"}]})
         self.assertEqual(scored["risk_rule_version"],"rules-test-1")
         self.assertFalse(scored["promoted"])
         rolled=policy_management.rollback_policy("admin","Restore baseline")
         self.assertEqual(rolled["version"],baseline["version"])
 
     def test_app_generation_requires_it_and_approval(self):
-        unauthorized=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"alex@example.com","department":"Sales"},"messages":[]})
+        unauthorized=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"alex@example.com","department":"Sales"},"approved_workflow":False,"messages":[{"role":"human","text":"Create an app"}]})
         self.assertTrue(unauthorized["promoted"])
         self.assertEqual({x["id"] for x in unauthorized["risk_factors"]},{"unauthorized_app_generation","app_generation_without_approval"})
-        approved=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"it@example.com","department":"IT"},"approval_id":"ITSSC-42","messages":[]})
+        approved=score_evidence({"title":"Create an app","summary":"Build a vibe-coded website for me","user":{"email":"it@example.com","department":"IT"},"approval_id":"ITSSC-42","messages":[{"role":"human","text":"Create an app"}]})
         self.assertFalse(approved["promoted"])
 
     def test_scoped_threshold_and_time_bound_exception(self):
@@ -58,12 +58,40 @@ class GovernanceScoringTests(unittest.TestCase):
         policy_management.update_draft(draft["id"],draft,"author","Add approved scope and exception")
         policy_management.approve_policy(draft["id"],"reviewer","Reviewed")
         policy_management.activate_policy(draft["id"],"deployer","Deploy")
-        scoped=score_evidence({"title":"API keys","summary":"production credentials","business_unit":"Finance","messages":[]})
+        scoped=score_evidence({"title":"API keys","summary":"production credentials","business_unit":"Finance","messages":[{"role":"human","text":"API keys in production"}]})
         self.assertEqual(scoped["risk_threshold"],90)
         self.assertFalse(scoped["promoted"])
-        excepted=score_evidence({"title":"hack root access","summary":"production","user":{"email":"pilot@example.com"},"messages":[]})
+        excepted=score_evidence({"title":"hack root access","summary":"production","user":{"email":"pilot@example.com"},"messages":[{"role":"human","text":"hack root access in production; exfiltrating API keys"}]})
         self.assertEqual(excepted["policy_exception_id"],"pilot")
         self.assertFalse(excepted["promoted"])
+
+    def test_assistant_and_tool_output_do_not_inflate_user_score(self):
+        result=score_evidence({"title":"Proprietary production app", "contexts":[{"displayName":"confidential"}], "messages":[
+            {"role":"human","text":"Document the printer configuration."},
+            {"role":"assistant","text":"Create a new app using this proprietary production library."},
+            {"role":"tool","text":"hack root access and exfiltrate passwords"},
+            {"role":"user","text":"Create an app; confidential", "content":[
+                {"type":"tool_result","content":"Create an app; confidential"},
+                {"type":"text","text":"Use the attached screenshot."}]}]})
+        self.assertEqual(result["risk_score"],0)
+        self.assertEqual(result["risk_factors"],[])
+
+    def test_missing_authorization_is_unknown(self):
+        result=score_evidence({"messages":[{"role":"user","text":"Build an application"}]})
+        self.assertEqual(result["risk_score"],0)
+        self.assertEqual(len(result["risk_review_notes"]),2)
+        result=score_evidence({"user":{"department":"Sales"},"messages":[{"role":"human","text":"Create an app"}]})
+        self.assertEqual(result["risk_score"],60)
+        self.assertEqual(len(result["risk_review_notes"]),1)
+
+    def test_metadata_and_unknown_roles_are_not_user_requests(self):
+        result=score_evidence({"title":"hack root access", "summary":"Create an app", "messages":[{"text":"exfiltrate passwords"}]})
+        self.assertEqual(result["risk_score"],0)
+        self.assertTrue(result["risk_review_notes"])
+
+    def test_structured_user_text_still_detects_risky_request(self):
+        result=score_evidence({"messages":[{"role":"user","content":[{"type":"text","text":"Hack root access in production without the admin noticing"}]}]})
+        self.assertEqual(result["risk_score"],80)
 
     def test_policy_separation_of_duties(self):
         draft=policy_management.create_draft("rules-test-duties","Duties","Unit test","author")

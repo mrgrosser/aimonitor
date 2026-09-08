@@ -76,6 +76,20 @@ class FindingStoreTests(unittest.TestCase):
         self.assertEqual(result["suppressed"], 1)
         self.assertEqual(finding_store.list_findings(), [])
         self.assertEqual(governance.suppressed_count(), 1)
+        retained=finding_store.get_finding(self.item["id"])
+        self.assertEqual(retained["messages"],self.item["messages"])
+        self.assertFalse(retained["promoted"])
+
+    def test_stale_scores_corrected_once_without_losing_transcript(self):
+        self.item["messages"]=[{"role":"human","text":"Document the printer"},{"role":"assistant","text":"Create an app with proprietary production code"}]
+        self.item.update(risk_pipeline_version="old",risk="critical",risk_score=100,promoted=True)
+        finding_store.upsert_finding(self.item,"anthropic")
+        self.assertEqual(finding_store.rescore_findings(stale_only=True),{"rescored":0,"suppressed":1})
+        retained=finding_store.get_finding(self.item["id"])
+        self.assertEqual(retained["risk_score"],0)
+        self.assertEqual(retained["messages"],self.item["messages"])
+        self.assertEqual(finding_store.list_findings(),[])
+        self.assertEqual(finding_store.rescore_findings(stale_only=True),{"rescored":0,"suppressed":0})
 
     def test_rescore_keeps_findings_that_still_qualify(self):
         governance.score_evidence(self.item)

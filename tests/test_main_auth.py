@@ -221,7 +221,7 @@ class FindingSyncTests(unittest.TestCase):
         import httpx
         for error in (HTTPException(429, "Rate limited"), HTTPException(503, "Unavailable"), httpx.ReadTimeout("Timeout")):
             item = self._sync_item(); item["id"] += type(error).__name__ + str(getattr(error,"status_code",0))
-            fetch = AsyncMock(side_effect=[error, {"messages":[{"text":"hack production"}]}])
+            fetch = AsyncMock(side_effect=[error, {"messages":[{"role":"human","text":"hack production"}]}])
             with patch.object(main,"_live_index",AsyncMock(side_effect=lambda:([copy.deepcopy(item)],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"anthropic_get",fetch):
                 first=asyncio.run(main.sync_provider_findings())
                 self.assertEqual(first["scored"],0); self.assertNotIn(item["id"],finding_store.known_versions())
@@ -230,7 +230,7 @@ class FindingSyncTests(unittest.TestCase):
 
     def test_failed_refresh_preserves_existing_evidence(self):
         from fastapi import HTTPException
-        item=self._sync_item(); item["messages"]=[{"text":"hack production"}]
+        item=self._sync_item(); item["messages"]=[{"role":"human","text":"hack production"}]
         governance.score_evidence(item); finding_store.upsert_finding(item,"anthropic")
         changed={**item,"updated_at":"2026-09-02T00:00:00Z"}
         with patch.object(main,"_live_index",AsyncMock(return_value=([changed],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"anthropic_get",AsyncMock(side_effect=HTTPException(500,"Unavailable"))):
@@ -238,7 +238,7 @@ class FindingSyncTests(unittest.TestCase):
         self.assertEqual(finding_store.get_finding(item["id"]),item)
 
     def test_expired_exception_reevaluates_unchanged_evidence(self):
-        item=self._sync_item(); item["title"]="hack production"
+        item=self._sync_item(); item["title"]="hack production"; item["messages"]=[{"role":"human","text":"hack production"}]
         policy=copy.deepcopy(main.active_policy())
         policy["exceptions"]=[{"id":"pilot","type":"user","value":"u1","expires_at":"2099-01-01T00:00:00Z"}]
         with patch.object(policy_management,"active_policy",return_value=policy), patch.object(main,"active_policy",return_value=policy), patch.object(main,"_live_index",AsyncMock(side_effect=lambda:([copy.deepcopy(item)],[],[]))), patch.object(main,"M365_ENABLED",False), patch.object(main,"hydrate_live",AsyncMock(side_effect=lambda rows:rows)):
@@ -252,7 +252,7 @@ class FindingSyncTests(unittest.TestCase):
                 self.assertEqual(asyncio.run(main.sync_provider_findings())["promoted"],1)
 
     def test_retention_blocks_reimport_after_policy_or_provider_change(self):
-        item=self._sync_item(); item["title"]="hack production"
+        item=self._sync_item(); item["title"]="hack production"; item["messages"]=[{"role":"human","text":"hack production"}]
         governance.score_evidence(item); finding_store.upsert_finding(item,"anthropic")
         with closing(sqlite3.connect(DB)) as db, db:
             db.execute("UPDATE findings SET first_seen_at=?",((datetime.now(timezone.utc)-timedelta(days=200)).isoformat(),))
@@ -415,7 +415,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.9.7")
+                self.assertEqual(active.get("/health").json()["version"],"0.9.8")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
