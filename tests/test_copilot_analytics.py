@@ -33,6 +33,22 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
         book=load_workbook(io.BytesIO(executive_xlsx(data)))
         self.assertEqual(len(book['Copilot users by app']._charts),1)
 
+    async def test_csv_collection_when_microsoft_rejects_json(self):
+        def respond(request):
+            if request.url.params.get('$format') != 'text/csv':
+                return httpx.Response(400,json={'error':{'code':'UnknownError','message':'JSON format is not supported.'}})
+            header='Report Refresh Date,Report Period,Any App Active Users,Any App Enabled Users,Word Active Users'
+            values='2026-09-06,30,8,12,5'
+            if 'Trend' in request.url.path:
+                header+=',Report Date';values+=',2026-09-05'
+            return httpx.Response(200,content=('\ufeff'+header+'\r\n'+values+'\r\n').encode('utf-8'),headers={'content-type':'application/octet-stream'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
+                data=await analytics.collect(client,'test-token',30)
+        self.assertEqual(data['summary']['copilot_active_users'],8)
+        self.assertEqual(data['copilot_user_trend'],[{'Date':'2026-09-05','Active users':8}])
+        self.assertEqual(data['copilot_adoption'][0]['name'],'Word')
+
     def test_csv_response(self):
         response=httpx.Response(200,content=b'\xef\xbb\xbfReport Refresh Date,Report Period,Any App Active Users,Any App Enabled Users,Microsoft Teams Active Users\n2026-09-06,30,8,12,4\n',headers={'content-type':'application/octet-stream'})
         row=analytics.parse(response)[0]

@@ -50,7 +50,7 @@ def parse(response,trend=False):
 async def fetch(client,token,days,trend=False):
     method='getMicrosoft365CopilotUserCountTrend' if trend else 'getMicrosoft365CopilotUserCountSummary'
     url=f"https://graph.microsoft.com/v1.0/copilot/reports/{method}(period='D{days}')"
-    response=await compliance_gate().get(client,url,headers={'Authorization':f'Bearer {token}'},params={'$format':'application/json'})
+    response=await compliance_gate().get(client,url,headers={'Authorization':f'Bearer {token}'},params={'$format':'text/csv'})
     response.raise_for_status()
     rows=parse(response,trend)
     if not rows:raise ValueError('Empty Microsoft usage report')

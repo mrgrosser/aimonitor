@@ -456,7 +456,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.10.4")
+                self.assertEqual(active.get("/health").json()["version"],"0.10.5")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
