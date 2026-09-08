@@ -58,7 +58,7 @@ async def fetch(client,token,days,trend=False):
         location=response.headers.get('location','')
         target=urlparse(location)
         host=(target.hostname or '').lower()
-        if target.scheme!='https' or target.username or target.password or target.port not in (None,443) or not (host=='reports.office.com' or host.endswith('.reports.office.com')):
+        if target.scheme!='https' or target.username or target.password or target.port not in (None,443) or not (host in {'reports.office.com','reportsncu.office.com'} or host.endswith('.reports.office.com')):
             raise ValueError('Unexpected Microsoft report download host: '+host)
         async with httpx.AsyncClient(timeout=60,follow_redirects=False) as download:
             response=await compliance_gate().get(download,location)
