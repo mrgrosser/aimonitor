@@ -95,3 +95,15 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(302,headers={'location':'https://example.com/download'}))) as client:
             with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
                 with self.assertRaises(ValueError):await analytics.fetch(client,'secret-token',30)
+
+
+class CollectorFailureTests(unittest.TestCase):
+    def test_diagnostic_does_not_expose_download_token(self):
+        self.assertIn('ReadTimeout',analytics.failure_detail(httpx.ReadTimeout('https://reports.office.com/download?token=secret')))
+        self.assertNotIn('secret',analytics.failure_detail(httpx.ReadTimeout('https://reports.office.com/download?token=secret')))
+        self.assertEqual(analytics.failure_detail(KeyError('reportPeriod')),'Missing report field: reportPeriod')
+
+    def test_csv_header_and_value_whitespace(self):
+        response=httpx.Response(200,text='Report Refresh Date , Report Period , Any App Active Users \n 2026-09-06 , 30 , 8 \n')
+        self.assertEqual(analytics.parse(response)[0]['reportPeriod'],'30')
+        self.assertEqual(analytics.parse(response)[0]['anyAppActiveUsers'],'8')
