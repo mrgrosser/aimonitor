@@ -2,6 +2,7 @@
 from asyncio import sleep
 from contextlib import closing
 from datetime import datetime,timezone,timedelta
+import calendar
 import csv
 import io
 import json
@@ -19,15 +20,43 @@ APPS={'microsoftTeams':'Teams','word':'Word','excel':'Excel','powerPoint':'Power
 def database():
     db=sqlite3.connect(usage_reporting.DB_PATH,timeout=30)
     db.execute('CREATE TABLE IF NOT EXISTS copilot_analytics (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+    db.execute("CREATE TABLE IF NOT EXISTS copilot_snapshots (period TEXT, refresh TEXT, payload TEXT NOT NULL, PRIMARY KEY(period,refresh))")
     return db
 
 def saved(period):
+    if period.startswith("Copilot - month "):return monthly(period.removeprefix("Copilot - month "))
     with closing(database()) as db:row=db.execute('SELECT payload FROM copilot_analytics WHERE period=?',(period,)).fetchone()
     return json.loads(row[0]) if row else None
 
 def periods():
     with closing(database()) as db:names={r[0] for r in db.execute('SELECT period FROM copilot_analytics')}
-    return [{'period':f'Copilot - last {d} days'} for d in WINDOWS if f'Copilot - last {d} days' in names]
+    return [{'period':f'Copilot - last {d} days'} for d in WINDOWS if f'Copilot - last {d} days' in names]+[{'period':'Copilot - month '+m} for m in sorted({d[:7] for d in history()},reverse=True)]
+
+def history():
+    # Include legacy cached windows immediately, without waiting for a new sync.
+    with closing(database()) as db:
+        reports=[json.loads(r[0]) for r in db.execute('SELECT payload FROM copilot_snapshots UNION ALL SELECT payload FROM copilot_analytics')]
+    daily={}
+    for report in sorted(reports,key=lambda r:(r.get('report_refresh_date',''),r.get('collected_at',''))):
+        for row in report.get('copilot_user_trend',[]):
+            if row.get('Active users') is not None:
+                daily[row['Date']]={**row,'refresh':report.get('report_refresh_date'),'collected':report.get('collected_at')}
+    return daily
+
+
+def monthly(month):
+    datetime.strptime(month,'%Y-%m')
+    rows=[r for day,r in sorted(history().items()) if day.startswith(month+'-')]
+    if not rows:return None
+    expected=calendar.monthrange(int(month[:4]),int(month[5:]))[1]
+    coverage=f'{len(rows)} of {expected} calendar days available'
+    daily=[{'Date':r['Date'],'Active users':r['Active users']} for r in rows]
+    return {'mode':'live','period':'Copilot - month '+month,'source':'Microsoft Graph Copilot daily adoption history',
+        'collected_at':max(r['collected'] for r in rows),'report_refresh_date':max(r['Date'] for r in rows),
+        'summary':{},'top_users':[],'copilot_user_trend':daily,
+        'executive_sections':[{'name':'Copilot monthly coverage','rows':[['Measure','Value'],['Calendar month',month],['Coverage',coverage],['Monthly unique active users','Unavailable from daily aggregate counts'],['Peak daily active users',max(r['Active users'] for r in rows)]]},{'name':'Copilot daily active users','rows':[['Date','Active users']]+[[r['Date'],r['Active users']] for r in rows]}],
+        'caveats':[coverage+'. Missing days are not treated as zero.','Monthly unique users and prompt totals are unavailable from this source; daily users must not be summed.','History is preserved from collected Microsoft rolling reports. Dates outside available history cannot be reconstructed.']}
+
 
 def count(value):
     if value is None or str(value).strip()=='':return None
@@ -112,9 +141,13 @@ async def run(token_provider):
             async with httpx.AsyncClient(timeout=60,follow_redirects=False) as client:
                 for days in WINDOWS:
                     old=saved(f'Copilot - last {days} days')
+                    if old:
+                        with closing(database()) as db:
+                            db.execute('INSERT OR IGNORE INTO copilot_snapshots VALUES (?,?,?)',(old['period'],old['report_refresh_date'],json.dumps(old)));db.commit()
                     if old and (datetime.now(timezone.utc)-datetime.fromisoformat(old['collected_at'])).total_seconds()<21600:continue
                     data=await collect(client,await token_provider(),days)
                     with closing(database()) as db:
+                        db.execute('INSERT OR REPLACE INTO copilot_snapshots VALUES (?,?,?)',(data['period'],data['report_refresh_date'],json.dumps(data)))
                         db.execute('INSERT OR REPLACE INTO copilot_analytics VALUES (?,?)',(data['period'],json.dumps(data)));db.commit()
             status.update(state='ready',message='Copilot usage collection succeeded')
         except httpx.HTTPStatusError as exc:
