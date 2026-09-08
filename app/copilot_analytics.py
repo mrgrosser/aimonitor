@@ -1,0 +1,91 @@
+"""Microsoft Graph Copilot adoption reports, collected without user enumeration."""
+from asyncio import sleep
+from contextlib import closing
+from datetime import datetime,timezone
+import csv
+import io
+import json
+import sqlite3
+import httpx
+from app import usage_reporting
+from app.compliance_http import compliance_gate
+
+status={'state':'pending','message':'Copilot usage waiting for first collection'}
+WINDOWS=(7,30,90,180)
+APPS={'microsoftTeams':'Teams','word':'Word','excel':'Excel','powerPoint':'PowerPoint','outlook':'Outlook','oneNote':'OneNote','loop':'Loop','copilotChat':'Copilot Chat'}
+
+def database():
+    db=sqlite3.connect(usage_reporting.DB_PATH,timeout=30)
+    db.execute('CREATE TABLE IF NOT EXISTS copilot_analytics (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+    return db
+
+def saved(period):
+    with closing(database()) as db:row=db.execute('SELECT payload FROM copilot_analytics WHERE period=?',(period,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+def periods():
+    with closing(database()) as db:names={r[0] for r in db.execute('SELECT period FROM copilot_analytics')}
+    return [{'period':f'Copilot - last {d} days'} for d in WINDOWS if f'Copilot - last {d} days' in names]
+
+def count(value):
+    if value is None or str(value).strip()=='':return None
+    number=int(value)
+    if number<0:raise ValueError('Negative adoption count')
+    return number
+
+def parse(response,trend=False):
+    if 'json' in response.headers.get('content-type',''):
+        body=response.json();output=[]
+        for parent in body['value']:
+            for row in parent['adoptionByDate' if trend else 'adoptionByProduct']:
+                output.append({'reportRefreshDate':parent['reportRefreshDate'],'reportPeriod':parent.get('reportPeriod'),**row})
+        return output
+    aliases={'Report Refresh Date':'reportRefreshDate','Report Date':'reportDate','Report Period':'reportPeriod','Any App Active Users':'anyAppActiveUsers','Any App Enabled Users':'anyAppEnabledUsers'}
+    for key,name in APPS.items():
+        csv_name='Microsoft Teams' if key=='microsoftTeams' else name
+        for suffix in ('Active Users','Enabled Users'):aliases[f'{csv_name} {suffix}']=key+suffix.replace(' ','')
+    rows=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
+    return [{aliases.get(k,k):v for k,v in row.items()} for row in rows]
+
+async def fetch(client,token,days,trend=False):
+    method='getMicrosoft365CopilotUserCountTrend' if trend else 'getMicrosoft365CopilotUserCountSummary'
+    url=f"https://graph.microsoft.com/v1.0/copilot/reports/{method}(period='D{days}')"
+    response=await compliance_gate().get(client,url,headers={'Authorization':f'Bearer {token}'},params={'$format':'application/json'})
+    response.raise_for_status()
+    rows=parse(response,trend)
+    if not rows:raise ValueError('Empty Microsoft usage report')
+    return rows
+
+async def collect(client,token,days):
+    summary=await fetch(client,token,days)
+    trend=await fetch(client,token,days,True)
+    if len(summary)!=1:raise ValueError('Unexpected summary rows')
+    row=summary[0]
+    if int(row['reportPeriod'])!=days:raise ValueError('Unexpected reporting window')
+    refresh=datetime.fromisoformat(row['reportRefreshDate']).date().isoformat()
+    if any(r['reportRefreshDate']!=row['reportRefreshDate'] or int(r['reportPeriod'])!=days for r in trend):raise ValueError('Inconsistent Microsoft report refresh; retry later')
+    active=count(row['anyAppActiveUsers']);enabled=count(row['anyAppEnabledUsers'])
+    if active is None or enabled is None:raise ValueError('Missing Microsoft adoption totals')
+    apps=[{'name':name,'users':count(row.get(key+'ActiveUsers')),'enabled':count(row.get(key+'EnabledUsers'))} for key,name in APPS.items()]
+    apps.sort(key=lambda r:r['users'] is None)
+    daily=[{'Date':datetime.fromisoformat(r['reportDate']).date().isoformat(),'Active users':count(r['anyAppActiveUsers'])} for r in trend]
+    return {'mode':'live','period':f'Copilot - last {days} days','source':f'Microsoft Graph Copilot adoption · {days}-day window · Microsoft refreshed {refresh}','collected_at':datetime.now(timezone.utc).isoformat(),'report_refresh_date':refresh,'summary':{'copilot_active_users':active,'copilot_enabled_users':enabled},'licensing':{},'copilot_adoption':apps,'copilot_user_trend':daily,'copilot_apps':[],'claude_products':[],'claude_models':[],'top_users':[],'executive_sections':[{'name':'Copilot adoption summary','rows':[['Measure','Value'],['Rolling window days',days],['Microsoft refresh date',refresh],['Active users',active],['Enabled users',enabled]]},{'name':'Copilot users by app','rows':[['App','Active users','Enabled users']]+[[r['name'],r['users'],r['enabled']] for r in apps]},{'name':'Copilot active user trend','rows':[['Date','Active users']]+[[r['Date'],r['Active users']] for r in daily]}],'caveats':['Microsoft reports a rolling window, not a calendar month.','Counts are active users, not prompts or interactions. Users can use multiple apps; do not sum app counts.','This source reports enabled Microsoft 365 Copilot adoption; it is not a complete Purview audit of every unlicensed Copilot Chat interaction.','Microsoft report refresh dates can lag collection time. No usage price or seat cost is supplied.']}
+
+async def run(token_provider):
+    while True:
+        status.update(state='syncing',message='Collecting Microsoft Copilot usage')
+        try:
+            async with httpx.AsyncClient(timeout=60,follow_redirects=False) as client:
+                for days in WINDOWS:
+                    old=saved(f'Copilot - last {days} days')
+                    if old and (datetime.now(timezone.utc)-datetime.fromisoformat(old['collected_at'])).total_seconds()<21600:continue
+                    data=await collect(client,await token_provider(),days)
+                    with closing(database()) as db:
+                        db.execute('INSERT OR REPLACE INTO copilot_analytics VALUES (?,?)',(data['period'],json.dumps(data)));db.commit()
+            status.update(state='ready',message='Copilot usage collection succeeded')
+        except httpx.HTTPStatusError as exc:
+            code=exc.response.status_code
+            status.update(state='error',message=f'Copilot usage HTTP {code}. '+('Grant Microsoft Graph application Reports.Read.All and admin consent.' if code in (401,403) else 'Previous results retained; collection will retry.'))
+        except Exception:
+            status.update(state='error',message='Copilot usage collection failed; previous results retained. Check Microsoft credentials and reporting availability.')
+        await sleep(21600)

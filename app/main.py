@@ -28,6 +28,7 @@ from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 from app.alert_management import expire_suppressions, alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
+from app import claude_analytics, copilot_analytics
 from app.governance_analytics import correlate_findings, usage_alerts
 from app.finding_store import expired_finding_ids, delete_finding, get_finding, init_finding_db, known_versions, list_findings, prune_findings, rescore_findings, touch_seen, upsert_finding
 from app.rapid7_export import get_config as rapid7_config, health as rapid7_health, init_rapid7_db, preview_event as rapid7_preview, process_outbox as process_rapid7, send_test as rapid7_send_test, update_config as rapid7_update_config
@@ -39,7 +40,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.10.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.10.2")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -952,7 +953,43 @@ async def alert_delivery(alert_id: str, request: Request, user: str=Depends(case
     except ValueError as exc: raise HTTPException(400,str(exc))
     audit(user,"alert_delivery_queued","alert",alert_id,details={"connector":connector,"idempotency_key":result["idempotency_key"]}); return result
 
+_analytics_worker = None
+_copilot_analytics_worker = None
+
+@app.on_event("startup")
+async def start_analytics():
+    global _analytics_worker, _copilot_analytics_worker
+    if not DEMO and M365_ENABLED:
+        _copilot_analytics_worker=asyncio.create_task(copilot_analytics.run(graph_token))
+    elif not DEMO:
+        copilot_analytics.status.update(state="not_configured",message="Configure Microsoft 365 credentials for Copilot usage")
+    key=os.getenv("ANTHROPIC_ANALYTICS_API_KEY", "").strip() or API_KEY
+    if not DEMO and key:
+        _analytics_worker=asyncio.create_task(claude_analytics.run(key,BASE_URL))
+    elif not DEMO:
+        claude_analytics.status.update(state="not_configured",message="Configure a Claude key with read:analytics")
+
+@app.on_event("shutdown")
+async def stop_analytics():
+    if _copilot_analytics_worker:
+        _copilot_analytics_worker.cancel()
+        try: await _copilot_analytics_worker
+        except asyncio.CancelledError: pass
+    if _analytics_worker:
+        _analytics_worker.cancel()
+        try: await _analytics_worker
+        except asyncio.CancelledError: pass
+
 def resolve_usage(period: str = "") -> dict[str, Any]:
+    if not DEMO:
+        if period.startswith("Copilot - "):
+            stored=copilot_analytics.saved(period)
+            if not stored: raise HTTPException(404,"Copilot reporting window is not collected yet")
+            return {**stored,"analytics_status":dict(copilot_analytics.status)}
+        if not period and not claude_analytics.periods() and copilot_analytics.periods():
+            return resolve_usage(copilot_analytics.periods()[0]["period"])
+        stored=claude_analytics.saved(period)
+        return {**(stored or {"mode":"live","period":period or None,"summary":{},"source":claude_analytics.status["message"],"licensing":{},"claude_products":[],"claude_models":[],"copilot_apps":[],"top_users":[],"caveats":[]}),"analytics_status":dict(claude_analytics.status)}
     if period:
         stored=get_usage_period(period)
         if stored: return {**stored,"mode":"imported"}
@@ -972,6 +1009,7 @@ def can_import_usage(identity: dict[str, Any]) -> bool:
 
 
 def usage_importer(request: Request) -> str:
+    if not DEMO: raise HTTPException(410,"Manual usage imports are disabled; analytics are collected automatically")
     identity = require_page(request, "usage")
     if not can_import_usage(identity):
         raise HTTPException(403, "Usage imports require an approved import role")
@@ -1020,17 +1058,18 @@ def usage_analytics(request: Request, period: str = "", user: str = Depends(curr
     raw=resolve_usage(period); generate_usage_alerts(raw); data=usage_for_identity(raw,request)
     audit(user,"usage_analytics_viewed","usage_analytics",str(data.get("period") or ""),request.client.host if request.client else "",
         request.headers.get("user-agent",""),{"mode":data.get("mode")})
-    return data
+    from app.report_charts import charts_html
+    return {**data,"charts_html":charts_html(data)}
 
 @app.get("/api/usage/periods")
 def usage_periods(request: Request, user: str = Depends(current_user)):
-    periods=list_usage_periods()
+    periods=list_usage_periods() if DEMO else claude_analytics.periods()+copilot_analytics.periods()
     if DEMO and not any(x["period"] == DEMO_USAGE["period"] for x in periods):
         s=DEMO_USAGE["summary"]; periods.append({"period":DEMO_USAGE["period"],"source_name":"Built-in anonymized demo",
             "source_hash":"demo","imported_at":None,"imported_by":"system","copilot_interactions":s["copilot_interactions"],
             "claude_requests":s["claude_requests"],"claude_usage_spend":s["claude_usage_spend"]})
     audit(user,"usage_periods_viewed","usage_analytics",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"periods":len(periods)})
-    return {"data":periods}
+    return {"data":periods,"analytics_status":{"message":claude_analytics.status["message"]+" · "+copilot_analytics.status["message"]}}
 
 @app.post("/api/usage/import/preview")
 async def usage_import_preview(request: Request, file: UploadFile = File(...), user: str = Depends(usage_importer)):
@@ -1056,7 +1095,10 @@ async def usage_import(request: Request, file: UploadFile = File(...), replace: 
 @app.get("/api/reports/usage")
 def usage_report(request: Request, period: str = "", report_format: str = Query("pdf",alias="format"), user: str = Depends(current_user)):
     data=usage_for_identity(resolve_usage(period),request); report_format=report_format.lower(); safe=re.sub(r"[^A-Za-z0-9._-]+","-",str(data.get("period") or "usage"))
-    if report_format == "pdf": payload=usage_pdf(data,user,APP_VERSION); media="application/pdf"; ext="pdf"
+    if report_format == "xlsx":
+        from app.executive_reporting import executive_xlsx
+        payload=executive_xlsx(data); media="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; ext="xlsx"
+    elif report_format == "pdf": payload=usage_pdf(data,user,APP_VERSION); media="application/pdf"; ext="pdf"
     elif report_format == "csv": payload=usage_csv(data,user,APP_VERSION); media="text/csv; charset=utf-8"; ext="csv"
     elif report_format == "json": payload=json.dumps({"generated_at":datetime.now(timezone.utc).isoformat(),"generated_by":user,"version":APP_VERSION,"report":data},indent=2).encode(); media="application/json"; ext="json"
     elif report_format == "html":

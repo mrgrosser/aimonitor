@@ -50,14 +50,24 @@ At the next sync, retained evidence with an older scoring pipeline is rescored b
 
 Leave `M365_COPILOT_USER_IDS` empty to discover users. `M365_COPILOT_MAX_USERS=0` follows all directory pages without a user cap (default remains 100). Per-user history failures are audited as `copilot_user_sync_failed` and reported as partial sync coverage while successful users continue. Discovery/token failures still fail the sync. HTML bodies are converted to plain text for display and scoring; the original body is retained in evidence JSON.
 
-### Executive monthly reports (0.10.0)
+### Executive monthly reports
 
-Reports now opens monthly AI usage reporting. An administrator imports the reference-format workbook under Usage & spend, previews validation, and confirms import. The CEO chooses an imported month and downloads the full Excel workbook or executive PDF. Detailed sections can be previewed with pagination. Compliance reports remain available through a separate button.
-
-The August layout with Department Summary uses strict reconciliation of user volumes and Claude detail spend; department names are not parsed as product counts, all users are retained, and unavailable licensing prices are not invented. Excel retains the 11 source sections and cached source values, with no executable imported formulas. PDF summarizes adoption, products, models, apps, departments, agents, daily activity, and top users. This is monthly import reporting, not automatic Purview/Claude analytics collection; the evidence API and risk-filtered findings are not a substitute for those sources. Previously imported August files should be reimported with Replace after previewing the corrected totals.
+Reports opens automatic monthly analytics with Excel, PDF, and print downloads. Detailed sections have pagination; compliance reports remain available through a separate button.
 
 For CEO access, create/assign the `Compliance.ReportsOnly` Entra application role and include it in `ENTRA_ALLOWED_ROLES` if sign-in is restricted by that setting. This role opens Reports and pseudonymizes email identities throughout previews and exports. It does not allow evidence browsing or imports. To authorize named usage reporting explicitly, add that role to `USAGE_USER_DETAIL_ROLES`; do not grant administrator access simply to enable report downloads. Existing compliance-report authorization remains separate.
 
 SQLite remains in use. Monthly report snapshots are read-heavy and suitable for one app process with the existing persistent volume and backups. Reassess PostgreSQL for multiple replicas or sustained concurrent writers. No database migration is included.
 
-Monthly executive reports include an app-mix chart, daily activity graph, and Claude product spend chart in the preview, PDF/print report, and Excel export. Charts use the imported monthly figures. Automatic Claude usage/cost collection is not connected yet; that requires the Enterprise Analytics API and a key with `read:analytics`. `read:spend_limits` is only needed for reporting configured limits, not actual usage costs.
+### Automatic Claude analytics (0.10.1)
+Live Usage & spend and Reports now collect directly from Claude Enterprise Analytics; no workbook import is required or offered. Live import endpoints are disabled. The collector uses ANTHROPIC_COMPLIANCE_ACCESS_KEY by default, with read:analytics required; an optional ANTHROPIC_ANALYTICS_API_KEY overrides it for a separate analytics key. Keep DEMO_MODE=false and the persistent /data volume.
+
+Startup collects the current month first and backfills up to 12 calendar months (within the provider retention window, starting January 2026). Current and previous months refresh hourly; older cached months refresh daily. Requests share the existing paced HTTP gate and Retry-After backoff. Completed monthly snapshots persist in SQLite; a failed collection leaves the prior snapshot intact. Refresh view reads the cache and does not start another provider request. Analytics status and collection time appear in the report, separately from evidence sync.
+
+Reports include Claude requests, tokens, active users, daily requests, product/model usage and actual USD spend. Copilot usage and seat costs are explicitly unavailable: the Copilot evidence connector is not a complete usage source. Grouped API breakdowns have the provider's top-100-per-day cap; headline totals use ungrouped calls. Historical imported workbooks remain stored but are not used by the live views.
+
+### Automatic Copilot adoption (0.10.2)
+Add Microsoft Graph APPLICATION permission `Reports.Read.All` to the existing JO AI Monitor Entra app and grant tenant admin consent. The existing M365_COPILOT_TENANT_ID, M365_COPILOT_CLIENT_ID, and M365_COPILOT_CLIENT_SECRET are reused; no additional credentials or user list is needed. This permission is separate from AiEnterpriseInteraction.Read.All used for evidence.
+
+The Graph v1.0 Copilot UserCountSummary and UserCountTrend reports collect automatically at startup and every six hours. Select Copilot - last 7/30/90/180 days under Usage & spend or Reports. Microsoft supplies rolling adoption windows rather than calendar-month prompt counts; these reports therefore remain separate from Claude monthly reports. Each report shows Microsoft's refresh date. Active users across apps overlap and cannot be added. Costs, prompt counts, and a complete Purview inventory of unlicensed chat activity are not supplied by this source. Failed refreshes preserve the prior snapshot and display the provider error. Existing evidence sync is independent.
+
+Reference: https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/api/admin-settings/reports/copilotreportroot-getmicrosoft365copilotusercountsummary

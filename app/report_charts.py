@@ -16,7 +16,7 @@ def series(data):
     if len(apps)>6: apps=apps[:5]+[("Other apps",sum(v for _,v in apps[5:]))]
     spend=positive(data.get("claude_products",[]),"name","spend")
     daily=[]
-    for row in data.get("copilot_daily",[]):
+    for row in (data.get("copilot_daily") or [{"Date":r["Date"],"Interactions":r["Requests"]} for r in data.get("claude_daily",[])] or [{"Date":r["Date"],"Interactions":r["Active users"]} for r in data.get("copilot_user_trend",[])]):
         try:
             day=datetime.fromisoformat(str(row["Date"]).replace("Z","+00:00")).date().isoformat()
             value=float(row["Interactions"])
@@ -43,11 +43,16 @@ def charts_html(data):
             x=45+(datetime.fromisoformat(day)-first).days/span*395;y=155-value/maximum*120;coords.append((x,y,day,value))
         points=' '.join(f'{x:.1f},{y:.1f}' for x,y,_,_ in coords)
         dots=''.join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="#3865e8"><title>{day}: {value:,.0f}</title></circle>' for x,y,day,value in coords)
-        card("Copilot daily activity",f'<svg viewBox="0 0 470 195" role="img" aria-label="Daily Copilot interactions"><path d="M45 30 V155 H445" fill="none" stroke="#a0acb8"/><text x="4" y="38" fill="currentColor" font-size="11">{maximum:,.0f}</text><text x="25" y="157" fill="currentColor" font-size="11">0</text><polyline points="{points}" fill="none" stroke="#3865e8" stroke-width="2.5"/>{dots}<text x="45" y="181" fill="currentColor" font-size="11">{daily[0][0]}</text><text x="440" y="181" text-anchor="end" fill="currentColor" font-size="11">{daily[-1][0]}</text></svg>',"Interactions by UTC date; only reported dates are shown")
+        card("Claude daily requests" if data.get("claude_daily") else "Copilot daily active users" if data.get("copilot_user_trend") else "Copilot daily activity",f'<svg viewBox="0 0 470 195" role="img" aria-label="Daily activity"><path d="M45 30 V155 H445" fill="none" stroke="#a0acb8"/><text x="4" y="38" fill="currentColor" font-size="11">{maximum:,.0f}</text><text x="25" y="157" fill="currentColor" font-size="11">0</text><polyline points="{points}" fill="none" stroke="#3865e8" stroke-width="2.5"/>{dots}<text x="45" y="181" fill="currentColor" font-size="11">{daily[0][0]}</text><text x="440" y="181" text-anchor="end" fill="currentColor" font-size="11">{daily[-1][0]}</text></svg>',"Activity by UTC date; only reported dates are shown")
+    adoption=[r for r in data.get("copilot_adoption",[]) if r.get("users") is not None]
+    if adoption:
+        maximum=max(1,max(r['users'] for r in adoption))
+        bars=''.join(f'<div class="chart-bar"><span>{html.escape(r["name"])}</span><div><i style="width:{r["users"]/maximum*100:.2f}%"></i></div><b>{r["users"]:,}</b></div>' for r in adoption)
+        card("Copilot active users by app",bars,"Users can appear in multiple apps; counts are not additive")
     if spend:
         maximum=max(v for _,v in spend)
         bars=''.join(f'<div class="chart-bar"><span>{html.escape(name)}</span><div><i style="width:{value/maximum*100:.2f}%"></i></div><b>${value:,.2f}</b></div>' for name,value in spend)
-        card("Claude spend by product",bars,"Reported token spend in USD; seat fees excluded")
+        card("Claude spend by product",bars,"Reported usage spend in USD; seat fees excluded")
     return '<div class="report-charts">'+''.join(cards)+'</div>' if cards else ''
 
 
@@ -67,7 +72,7 @@ def pdf_charts(data):
             d.add(String(186,140-i*20,f"{name} ({value/total*100:.1f}%)",fontSize=9,fill=ink))
         d.add(pie);drawings.append(d)
     if daily:
-        d=Drawing(450,180);d.add(String(0,164,"Copilot daily interactions (UTC)",fontSize=12,fill=ink))
+        d=Drawing(450,180);d.add(String(0,164,("Claude daily requests (UTC)" if data.get("claude_daily") else "Copilot daily active users" if data.get("copilot_user_trend") else "Copilot daily interactions (UTC)"),fontSize=12,fill=ink))
         maximum=max(1,max(v for _,v in daily));first=datetime.fromisoformat(daily[0][0]);span=max(1,(datetime.fromisoformat(daily[-1][0])-first).days)
         points=[]
         for day,value in daily:points.extend([45+(datetime.fromisoformat(day)-first).days/span*385,30+value/maximum*110])
@@ -77,7 +82,7 @@ def pdf_charts(data):
         d.add(String(0,133,f"{maximum:,.0f}",fontSize=8,fill=ink));d.add(String(28,28,"0",fontSize=8,fill=ink))
         d.add(String(45,12,daily[0][0],fontSize=8,fill=ink));d.add(String(365,12,daily[-1][0],fontSize=8,fill=ink));drawings.append(d)
     if spend:
-        d=Drawing(450,40+len(spend)*25);top=d.height-18;d.add(String(0,top,"Claude token spend by product (USD; excludes seats)",fontSize=12,fill=ink));maximum=max(v for _,v in spend)
+        d=Drawing(450,40+len(spend)*25);top=d.height-18;d.add(String(0,top,"Claude usage spend by product (USD; excludes seats)",fontSize=12,fill=ink));maximum=max(v for _,v in spend)
         for i,(name,value) in enumerate(spend):
             y=top-27-i*25;d.add(String(0,y,name,fontSize=9,fill=ink));d.add(Rect(125,y-2,235*value/maximum,12,fillColor=blue,strokeColor=None));d.add(String(370,y,f"${value:,.2f}",fontSize=9,fill=ink))
         drawings.append(d)
@@ -89,7 +94,7 @@ CHART_CSS=""".report-charts{display:grid;grid-template-columns:repeat(auto-fit,m
 
 def excel_charts(workbook):
     from openpyxl.chart import DoughnutChart,LineChart,BarChart,Reference
-    for name,header,col,title,kind in [("Copilot App Totals","App",2,"Copilot app mix (interactions)","pie"),("Copilot Daily Trend","Date",2,"Daily Copilot interactions (UTC)","line"),("Claude Product & Model","Product",3,"Claude token spend by product (USD)","bar")]:
+    for name,header,col,title,kind in [("Copilot users by app","App",2,"Copilot active users by app","users"),("Copilot active user trend","Date",2,"Copilot daily active users","line"),("Claude Daily Trend","Date",2,"Daily Claude requests (UTC)","line"),("Copilot App Totals","App",2,"Copilot app mix (interactions)","pie"),("Copilot Daily Trend","Date",2,"Daily Copilot interactions (UTC)","line"),("Claude Product & Model","Product",3,"Claude usage spend by product (USD)","bar")]:
         if name not in workbook:continue
         sheet=workbook[name]
         start=next((row[0].row for row in sheet if row[0].value==header),None)
@@ -107,5 +112,5 @@ def excel_charts(workbook):
         if kind=="pie":chart.holeSize=65
         else:
             chart.legend=None
-            chart.y_axis.title="USD" if kind=="bar" else "Interactions"
+            chart.y_axis.title="USD" if kind=="bar" else "Requests" if name=="Claude Daily Trend" else "Active users" if name.startswith("Copilot ") and name not in {"Copilot App Totals","Copilot Daily Trend"} else "Interactions"
         sheet.add_chart(chart,f"A{sheet.max_row+3}")
