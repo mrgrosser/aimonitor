@@ -18,3 +18,25 @@
 .executive-table{overflow:auto;max-width:100%;margin:16px 0}.executive-table td{min-width:110px;max-width:440px;overflow-wrap:anywhere}.executive-table tr:first-child{font-weight:700}.executive-table tr{cursor:default}
 
 .report-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:22px 0}.report-chart{border:1px solid #dce3ec;border-radius:10px;padding:18px;min-width:0;break-inside:avoid}.report-chart h3{font-size:15px;margin:0 0 16px}.report-chart p{font-size:12px;color:#758194}.report-chart svg{width:100%;max-height:210px}.chart-mix{display:flex;align-items:center;gap:12px}.chart-mix svg{width:45%;flex-shrink:0}.chart-mix ul{list-style:none;padding:0;font-size:11px;flex:1}.chart-mix li{margin:8px 0}.chart-mix b{white-space:nowrap}.chart-bar{display:grid;grid-template-columns:minmax(70px,1fr) 1.3fr auto;gap:8px;align-items:center;margin:14px 0;font-size:12px}.chart-bar>div{background:#e8edf5;height:10px;border-radius:4px;overflow:hidden}.chart-bar i{display:block;height:100%;background:#3865e8}.chart-bar b{font-variant-numeric:tabular-nums}@media print{.report-charts{display:block}.report-chart{margin:12px 0}.report-chart svg{max-width:500px}}
+
+/* Usage reports: restrained color, stronger hierarchy, readable charts. */
+#executiveReport,#copilotOverview{--report-accent:#3865e8}
+#copilotOverview{--report-accent:#14877f;margin-bottom:24px}
+#executiveReport>.usage-panel,#copilotOverview>.usage-panel{border-top:4px solid var(--report-accent);border-radius:14px;padding:24px;box-shadow:0 8px 28px #17223108}
+#executiveReport .usage-heading,#copilotOverview h2{padding-bottom:18px;border-bottom:1px solid var(--line)}
+#executiveReport .usage-heading h3,#copilotOverview h2{font-size:22px;letter-spacing:-.025em}
+#executiveReport .usage-kpis,#copilotOverview .usage-kpis{grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin:24px 0}
+#executiveReport .usage-kpi,#copilotOverview .usage-kpi{position:relative;overflow:hidden;padding:22px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,#f1f5ff,#fff)}
+#copilotOverview .usage-kpi{background:linear-gradient(120deg,#edf9f5,#fff)}
+#executiveReport .usage-kpi b,#copilotOverview .usage-kpi b{font:750 32px/1.2 ui-sans-serif,system-ui,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:-.04em;color:var(--report-accent);margin:10px 0}
+#executiveReport .report-chart,#copilotOverview .report-chart{background:linear-gradient(160deg,#f8faff,#fff);border-radius:12px;padding:22px}
+#copilotOverview .chart-bar i{background:linear-gradient(90deg,#14877f,#48b6a5)}
+#executiveReport .chart-bar i{background:linear-gradient(90deg,#3865e8,#829df5)}
+#executiveReport .chart-bar>div,#copilotOverview .chart-bar>div{height:12px;border-radius:6px}
+#executiveReport select{padding:9px 12px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);margin-left:8px;max-width:100%}
+#viewCopilotDetail{background:var(--report-accent);color:white;border:0;border-radius:7px;padding:10px 15px;cursor:pointer;font:inherit}
+[data-theme="dark"] #executiveReport .usage-kpi,[data-theme="dark"] #copilotOverview .usage-kpi,[data-theme="dark"] #executiveReport .report-chart,[data-theme="dark"] #copilotOverview .report-chart{background:linear-gradient(135deg,#1a293c,#182330);border-color:#354456}
+[data-theme="dark"] #executiveReport{--report-accent:#91adff}
+[data-theme="dark"] #copilotOverview{--report-accent:#62cbb8}
+[data-theme="dark"] #viewCopilotDetail{color:#101821}
+@media(max-width:600px){#executiveReport>.usage-panel,#copilotOverview>.usage-panel{padding:16px}.usage-heading{align-items:flex-start;gap:12px;flex-direction:column}}

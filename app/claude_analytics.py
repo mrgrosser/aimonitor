@@ -34,6 +34,9 @@ def saved(period=''):
 
 def normalize_cached(data):
     """v0.10.2 stored API cents as dollars; repair that known cache schema once."""
+    data['caveats']=[c for c in data.get('caveats',[]) if not c.startswith('Copilot usage is not connected.')]
+    for section in data.get('executive_sections',[]):
+        section['rows']=[r for r in section.get('rows',[]) if not (r and r[0]=='Copilot usage')]
     if data.get('cost_unit') == 'USD': return data
     def dollars(value): return float(Decimal(str(value))/Decimal('100'))
     summary=data.get('summary',{})
@@ -100,8 +103,8 @@ async def collect(client,start,end):
     daily=[{'Date':b['starting_at'][:10],'Requests':total([b],'requests')} for b in fetched['usage','']]
     tokens=sum(int(r.get(k,0)) for b in fetched['usage',''] for r in b['results'] for k in ('uncached_input_tokens','cache_read_input_tokens','output_tokens'))+sum(int(v) for b in fetched['usage',''] for r in b['results'] for v in (r.get('cache_creation') or {}).values())
     sections=[{'name':'Claude Product & Model','rows':[['Product','Requests','Spend']]+[[p['name'],p['requests'],p['spend']] for p in products]+[[],['Model','Requests','Spend']]+[[p['name'],p['requests'],p['spend']] for p in models]}, {'name':'Claude Daily Trend','rows':[['Date','Requests']]+[[r['Date'],r['Requests']] for r in daily]}]
-    sections.insert(0,{'name':'AI Usage Summary','rows':[['Measure','Value'],['Claude active users',active_users],['Claude requests',total(fetched['usage',''],'requests')],['Claude tokens',tokens],['Claude usage spend USD',total(fetched['cost',''],'amount')],['Copilot usage','Not connected'],['Collected at',datetime.now(timezone.utc).isoformat()]]})
-    return {'cost_unit':'USD','period':start.strftime('%Y-%m'),'mode':'live','source':'Claude Enterprise Analytics API','collected_at':datetime.now(timezone.utc).isoformat(),'range_start':start.isoformat(),'range_end':end.isoformat(), 'summary':{'claude_active_users':active_users,'claude_tokens':tokens,'claude_requests':total(fetched['usage',''],'requests'),'claude_usage_spend':total(fetched['cost',''],'amount')},'licensing':{},'claude_products':products,'claude_models':models,'claude_daily':daily,'copilot_apps':[],'top_users':[],'executive_sections':sections,'caveats':['Copilot usage is not connected. Evidence counts are not usage totals.','Spend is reported USD usage cost, excluding seat fees.','Product/model breakdowns are limited by the provider to the top 100 groups per day; headline totals use ungrouped results.','Current month is month-to-date; provider analytics may lag recent activity.']}
+    sections.insert(0,{'name':'AI Usage Summary','rows':[['Measure','Value'],['Claude active users',active_users],['Claude requests',total(fetched['usage',''],'requests')],['Claude tokens',tokens],['Claude usage spend USD',total(fetched['cost',''],'amount')],['Collected at',datetime.now(timezone.utc).isoformat()]]})
+    return {'cost_unit':'USD','period':start.strftime('%Y-%m'),'mode':'live','source':'Claude Enterprise Analytics API','collected_at':datetime.now(timezone.utc).isoformat(),'range_start':start.isoformat(),'range_end':end.isoformat(), 'summary':{'claude_active_users':active_users,'claude_tokens':tokens,'claude_requests':total(fetched['usage',''],'requests'),'claude_usage_spend':total(fetched['cost',''],'amount')},'licensing':{},'claude_products':products,'claude_models':models,'claude_daily':daily,'copilot_apps':[],'top_users':[],'executive_sections':sections,'caveats':['Spend is reported USD usage cost, excluding seat fees.','Product/model breakdowns are limited by the provider to the top 100 groups per day; headline totals use ungrouped results.','Current month is month-to-date; provider analytics may lag recent activity.']}
 
 async def run(key,base_url):
     while True:

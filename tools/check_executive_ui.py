@@ -10,6 +10,7 @@ def route_app(route):
     if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"test"})
     elif path=="/api/auth/me": route.fulfill(json={"pages":["reports"],"usage_import":False})
     elif path in ("/api/reports/executive/periods","/api/usage/periods"):route.fulfill(json={"current_month":"2026-09","data":[{"period":"2026-09"},{"period":"2026-08"},{"period":"Copilot - last 30 days"}]})
+    elif path=="/api/usage" and "Copilot" in route.request.url:route.fulfill(json={"summary":{"copilot_active_users":8,"copilot_enabled_users":12},"report_refresh_date":"2026-09-06","charts_html":"","executive_sections":[]})
     elif path in ("/api/reports/executive","/api/usage"):route.fulfill(json={"period":"August 2026","mode":"imported","source":"Monthly workbook","summary":{"copilot_active_users":10,"copilot_interactions":100,"claude_requests":20,"claude_usage_spend":3.5},"executive_sections":[{"name":"Department Summary","rows":[["Department","Users"],["<script>bad()</script>",2]]},{"name":"Daily trend","rows":[[str(i),i] for i in range(65)]}],"user_detail_included":False,"charts_html":CHARTS})
     elif path.startswith("/api/"):route.fulfill(json={"data":[]})
     else:
@@ -37,5 +38,8 @@ with sync_playwright() as p:
     page.evaluate("openExecutiveReports(true)")
     page.wait_for_function("document.querySelector('#executivePeriod')?.value==='2026-09'")
     assert page.locator("#executivePeriod option").all_text_contents()==["2026-09","Copilot - last 30 days"]
+    page.locator("#viewCopilotDetail").wait_for()
+    assert "Active users" in page.locator("#copilotOverview").inner_text()
+    assert "8" in page.locator("#copilotOverview").inner_text()
     assert not errors,errors
     browser.close();print("PASS: reports-only monthly preview, section pagination, download links, escaped content")

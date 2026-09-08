@@ -106,7 +106,7 @@ def excel_charts(workbook):
             end+=1
         if end==start:continue
         chart=DoughnutChart() if kind=="pie" else LineChart() if kind=="line" else BarChart()
-        chart.title=title;chart.style=10;chart.width=23;chart.height=12
+        chart.title=title;chart.style=13;chart.width=23;chart.height=12
         chart.add_data(Reference(sheet,min_col=col,min_row=start,max_row=end),titles_from_data=True)
         chart.set_categories(Reference(sheet,min_col=1,min_row=start+1,max_row=end))
         if kind=="pie":chart.holeSize=65
