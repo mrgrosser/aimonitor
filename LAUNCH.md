@@ -73,3 +73,7 @@ The Graph v1.0 Copilot UserCountSummary and UserCountTrend reports collect autom
 Reference: https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/api/admin-settings/reports/copilotreportroot-getmicrosoft365copilotusercountsummary
 
 Usage & spend now shows the current UTC calendar month and a separate group of latest Copilot rolling windows. Reports lists only completed months; rolling-window totals are never labeled as historical monthly totals. Copilot usage failures now include Microsoft error text and request ID in the page status and Access audit (`copilot_usage_failed`).
+
+### Stabilization follow-up
+
+See ROLLOUT_CHECKLIST.md for widening-access checks. Historical Copilot reports use available daily activity with explicit coverage. Average daily users includes reported zeros and excludes missing dates; peak is the largest reported daily count. Neither is monthly unique users. Enabled counts are retained when supplied and labeled by date. No new permissions or manual import is required for these metrics. Old snapshots without enabled counts cannot supply them until a successful collection includes those dates.

@@ -4,6 +4,12 @@ JO AI Monitor is evolving from an AI compliance evidence explorer into a provide
 
 > **Approval status:** JO AI Monitor has not yet received formal Security or Compliance approval. Current releases should be treated as evaluation and pilot software. Features involving named-user monitoring, prompt content, retention, alerting, or automated enforcement must pass the approval gates below before production use.
 
+## Current stabilization work — September 2026
+
+Live Claude analytics and Copilot rolling adoption collection are implemented. Copilot daily history is retained for calendar-month reporting; monthly unique users cannot be inferred by summing daily aggregates. System appearance mode is delivered.
+
+Before expanding pilot access, complete ROLLOUT_CHECKLIST.md: reconcile provider totals, test deployed roles and exports, rehearse restore and rollback, validate scoring, agree retention, and record approvals. Local test results do not substitute for these deployment checks. The GitHub test workflow does not deploy or publish images.
+
 ## Product principles
 
 - Preserve evidence fidelity and provenance.

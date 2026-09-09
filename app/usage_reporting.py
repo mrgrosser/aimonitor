@@ -273,7 +273,22 @@ def usage_csv(data: dict[str, Any], actor: str = "", version: str = "") -> bytes
     for row in data.get("claude_models",[]): writer.writerow([row.get("name"),row.get("requests"),row.get("spend")])
     writer.writerow([]); writer.writerow(["Copilot application","Interactions","Users"])
     for row in data.get("copilot_apps",[]): writer.writerow([row.get("name"),row.get("interactions"),row.get("users")])
+    if data.get('user_report_schema'):
+        writer.writerow([])
+        writer.writerow(['User','Provider','Requests','Tokens','Last activity','Activity','Applications'])
+        for row in data.get('top_users',[]):
+            writer.writerow([row.get('user'),row.get('provider'),row.get('volume'),row.get('tokens'),row.get('last_activity'),row.get('activity_status','Recorded usage'),', '.join(row.get('products',[]))])
+    if data.get('user_report_schema',0)>=2:
+        for section in data.get('executive_sections',[]):
+            writer.writerow([]);writer.writerow([section['name']])
+            for values in section['rows']:writer.writerow(values)
     return out.getvalue().encode("utf-8-sig")
+
+
+def monthly_copilot_metrics(data):
+    summary=data.get('summary',{})
+    if 'copilot_average_daily_users' not in summary:return None
+    return [['Measure','Value'],['Average daily active users',summary['copilot_average_daily_users']],['Peak daily active users',summary['copilot_peak_daily_users']],['Reported calendar days',f"{summary['copilot_reported_days']} of {summary['copilot_calendar_days']}"]]
 
 
 def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
@@ -287,6 +302,7 @@ def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
         ["Claude active users",summary.get("claude_active_users","Unavailable")],["Claude API requests",summary.get("claude_requests","Unavailable")],
         ["Claude usage spend",f"${_number(summary.get('claude_usage_spend')):,.2f}" if "claude_usage_spend" in summary else "Unavailable"],["Estimated monthly run rate",f"${_number(licensing.get('estimated_monthly_run_rate')):,.2f}" if "estimated_monthly_run_rate" in licensing else "Not supplied"],
         ["Unassigned Claude seats",licensing.get("claude_seats_unassigned","Not supplied")]]
+    metrics=monthly_copilot_metrics(data) or metrics
     table=Table(metrics,colWidths=[3.6*inch,2.6*inch]); table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#172231")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#D8DEE6")),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F6F8FA")]),("PADDING",(0,0),(-1,-1),7)])); story += [table,Spacer(1,14)]
     from app.report_charts import pdf_charts
     drawings=pdf_charts(data)
@@ -294,14 +310,15 @@ def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
     for title,rows,columns in [("Claude products",data.get("claude_products",[]),[("Product","name"),("Requests","requests"),("Spend","spend")]),
             ("Claude models",data.get("claude_models",[]),[("Model","name"),("Requests","requests"),("Spend","spend")]),
             ("Copilot applications",data.get("copilot_apps",[]),[("Application","name"),("Interactions","interactions"),("Users","users")])]:
+        if not rows:continue
         if title == "Copilot applications": story.append(PageBreak())
         story.append(Paragraph(title,styles["Heading2"])); values=[[x[0] for x in columns]]+[[f"${_number(row.get(key)):,.2f}" if key == "spend" else row.get(key,"") for _,key in columns] for row in rows]
         t=Table(values,repeatRows=1,colWidths=[3.5*inch,1.35*inch,1.35*inch]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor(report_accent)),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D8DEE6")),("PADDING",(0,0),(-1,-1),6)])); story += [t,Spacer(1,12)]
-    extra=[("Copilot users by app",data.get("copilot_adoption",[]),[("App","name"),("Active users","users"),("Enabled users","enabled")]),("Copilot active user trend",data.get("copilot_user_trend",[]),[("Date","Date"),("Active users","Active users")]),("Department adoption",data.get("departments",[]),[("Department","Department"),("Headcount","Headcount"),("Copilot users","Copilot users"),("Claude users","Claude users")]),
+    extra=[("Copilot users by app",data.get("copilot_adoption",[]),[("App","name"),("Active users","users"),("Enabled users","enabled")]),("Copilot active user trend",data.get("copilot_user_trend",[]),[("Date","Date"),("Active users","Active users"),("Enabled users","Enabled users")]),("Department adoption",data.get("departments",[]),[("Department","Department"),("Headcount","Headcount"),("Copilot users","Copilot users"),("Claude users","Claude users")]),
         ("Copilot agents",data.get("copilot_agents",[]),[("Agent","Agent"),("Interactions","Interactions"),("Users","Users")]),
         ("Copilot daily trend",data.get("copilot_daily",[]),[("Date","Date"),("Interactions","Interactions"),("Users","Active users")])]
     for provider in ("Microsoft 365 Copilot","Claude Enterprise"):
-        selected=sorted([r for r in data.get("top_users",[]) if r.get("provider")==provider],key=lambda r:r.get("volume",0),reverse=True)[:10]
+        selected=sorted([r for r in data.get("top_users",[]) if r.get("provider")==provider],key=lambda r:r.get("volume") or 0,reverse=True)[:10]
         extra.append((provider+" — top 10 by recorded volume",selected,[("User","user"),("Department","department"),("Volume","volume")]))
     for title,items,columns in extra:
         if not items: continue
@@ -328,10 +345,16 @@ def usage_html(data: dict[str, Any], actor: str, version: str) -> str:
     from app.report_charts import charts_html, CHART_CSS
     sections=""
     for section in data.get("executive_sections",[]):
-        if section["name"] in {"Copilot Detail","Claude Detail"}: continue
+        if section["name"] in {"Copilot Detail","Claude Detail"} and not data.get("user_report_schema"): continue
         section_rows="".join("<tr>"+"".join(f"<td>{html.escape(str(v if v is not None else ''))}</td>" for v in row)+"</tr>" for row in section["rows"])
         sections+=f"<h2>{html.escape(section['name'])}</h2><table>{section_rows}</table>"
     rendered=f"""<!doctype html><html><head><meta charset='utf-8'><title>JO AI Monitor Report</title><style>body{{font:14px Arial;color:#172231;border-top:6px solid #3865e8;max-width:1000px;margin:36px auto;padding:0 20px}}h1{{margin-bottom:2px}}.meta{{color:#697386}}.cards{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}}.card{{border:1px solid #dce1e6;padding:22px;border-radius:12px;background:linear-gradient(135deg,#eef3ff,#fff)}}.card b{{display:block;font-size:30px;color:#315fdc;margin-top:10px;font-variant-numeric:tabular-nums}}table{{width:100%;border-collapse:collapse;margin:8px 0 24px}}th,td{{border-bottom:1px solid #e4e7eb;padding:8px;text-align:left}}th{{background:#172231;color:#fff}}@media print{{button{{display:none}}body{{margin:0}}}}{CHART_CSS}</style></head><body><button onclick='print()'>Print / Save PDF</button><h1>JO AI Monitor</h1><h2>Usage &amp; Spend Report</h2><p class='meta'>{html.escape(str(data.get('period','')))} · Generated by {html.escape(actor)} · {html.escape(version)}</p><div class='cards'><div class='card'>Copilot interactions<b>{format(_integer(s['copilot_interactions']),',') if 'copilot_interactions' in s else 'Unavailable'}</b></div><div class='card'>Claude requests<b>{format(_integer(s['claude_requests']),',') if 'claude_requests' in s else 'Unavailable'}</b></div><div class='card'>Claude spend<b>{('$'+format(_number(s['claude_usage_spend']),',.2f')) if 'claude_usage_spend' in s else 'Unavailable'}</b></div><div class='card'>Monthly run rate<b>${format(_number(l.get('estimated_monthly_run_rate')), ',.2f') if 'estimated_monthly_run_rate' in l else '—'}</b></div></div>{charts_html(data)}<h2>Claude products</h2><table><tr><th>Product</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_products',[]),['name','requests','spend'])}</table><h2>Claude models</h2><table><tr><th>Model</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_models',[]),['name','requests','spend'])}</table><h2>Copilot applications</h2><table><tr><th>Application</th><th>Interactions</th><th>Users</th></tr>{rows(data.get('copilot_apps',[]),['name','interactions','users'])}</table>{sections}<p>{html.escape(" ".join(data.get("caveats",[])))}</p></body></html>"""
 
+    monthly=monthly_copilot_metrics(data)
+    if monthly:
+        start=rendered.index("<div class='cards'>")
+        end=rendered.index('</div></div>',start)+len('</div></div>')
+        cards="<div class='cards'>"+''.join("<div class='card'>"+html.escape(str(label))+"<b>"+html.escape(str(value))+"</b></div>" for label,value in monthly[1:])+"</div>"
+        rendered=rendered[:start]+cards+rendered[end:]
     from app.report_charts import accent
     return rendered.replace("#3865e8",accent(data)).replace("#315fdc",accent(data)).replace("#eef3ff","#fff5ef" if accent(data)=="#c56645" else "#edf9f5")

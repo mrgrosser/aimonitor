@@ -66,3 +66,12 @@ class ReportChartTests(unittest.TestCase):
         self.assertEqual(len(book["Copilot App Totals"]._charts),1)
         self.assertEqual(len(book["Claude Product & Model"]._charts),1)
         self.assertIn("'Claude Product & Model'!",book["Claude Product & Model"]._charts[0].ser[0].val.numRef.f)
+
+class AgentFooterTests(unittest.TestCase):
+    def test_agent_subtotal_and_direct_usage_are_not_agents(self):
+        book=load_workbook(io.BytesIO(sample()))
+        sheet=book.create_sheet('Copilot Agents')
+        for row in [['Agent','Interactions','Users','Primary host app'],['Draft',2,1,'Word'],['Total agent-assisted',2,None,None],['Direct (non-agent) interactions',8,None,None]]:sheet.append(row)
+        out=io.BytesIO();book.save(out);book.close()
+        data,_=parse_usage_file(out.getvalue(),'example.xlsx')
+        self.assertEqual(len(data['copilot_agents']),1)

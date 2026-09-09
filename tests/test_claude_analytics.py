@@ -12,6 +12,8 @@ class AnalyticsTests(unittest.IsolatedAsyncioTestCase):
             calls.append(request)
             if 'user_usage' in request.url.path:
                 return httpx.Response(200,json={'data':[{'actor':{'user_id':'a'},'requests':2},{'actor':{'user_id':'b'},'requests':0}], 'has_more':False})
+            if 'user_cost' in request.url.path:
+                return httpx.Response(200,json={'data':[{'actor':{'user_id':'a'},'amount':'100','list_amount':'125','currency':'USD'}],'has_more':False})
             cost='cost_report' in request.url.path
             row={'amount':'1234','currency':'USD'} if cost else {'requests':9}
             dimension=request.url.params.get('group_by[]')
@@ -24,7 +26,11 @@ class AnalyticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['summary']['claude_requests'],9)
         self.assertEqual(data['summary']['claude_active_users'],1)
         self.assertNotIn('copilot_interactions',data['summary'])
-        self.assertEqual(len(calls),7)
+        self.assertEqual(len(data['top_users']),1)
+        self.assertEqual(data['top_users'][0]['volume'],2)
+        self.assertEqual(len(calls),8)
+        self.assertEqual(data["top_users"][0]["spend"],1)
+        self.assertEqual(data["claude_detail"][0]["gross_spend"],1.25)
         self.assertEqual(data['mode'],'live')
 
     async def test_pagination_and_403(self):

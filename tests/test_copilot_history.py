@@ -18,6 +18,22 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(len(monthly['copilot_user_trend']),2)
             self.assertIn('2 of 31',monthly['caveats'][0])
             self.assertNotIn('copilot_active_users',monthly['summary'])
+            self.assertEqual(monthly['summary']['copilot_average_daily_users'],1.5)
+            self.assertEqual(monthly['summary']['copilot_peak_daily_users'],3)
+            from app.usage_reporting import usage_html, monthly_copilot_metrics, usage_pdf
+            rendered=usage_html(monthly,'tester','test')
+            self.assertIn('Average daily active users',rendered)
+            self.assertNotIn('Unavailable</b>',rendered)
+            self.assertEqual(monthly_copilot_metrics(monthly)[1][1],1.5)
+            self.assertTrue(usage_pdf(monthly,'tester','test').startswith(b'%PDF'))
+            from io import BytesIO
+            from openpyxl import load_workbook
+            from app.executive_reporting import executive_xlsx
+            workbook=load_workbook(BytesIO(executive_xlsx(monthly)))
+            values=[list(row) for sheet in workbook for row in sheet.values]
+            self.assertTrue(any(row[:2]==['Average daily active users',1.5] for row in values))
+            self.assertTrue(any(row[:2]==['Peak daily active users',3] for row in values))
+            workbook.close()
             with closing(c.database()) as db:
                 db.execute('INSERT INTO copilot_snapshots VALUES (?,?,?)',(old['period'],old['report_refresh_date'],json.dumps(old)))
                 new=report('2026-09-02',[('2026-08-01',4),('2026-09-01',9)])

@@ -1,10 +1,10 @@
 # JO AI Monitor Risk Scoring
 
-JO AI Monitor currently uses a deterministic, explainable rules engine. Demo mode supplies synthetic evidence, but the score itself is not hardcoded: prompts, responses, summaries, and accessed-resource context are evaluated at request time. Live Claude and Microsoft 365 Copilot evidence follows the same scoring path.
+JO AI Monitor currently uses a deterministic, explainable rules engine. Demo mode supplies synthetic evidence, but the score itself is not hardcoded: user-authored text is evaluated; assistant responses, generated titles, summaries, and resource labels do not contribute. Live Claude and Microsoft 365 Copilot evidence follows the same scoring path.
 
 ## Current scoring process
 
-1. Combine the evidence title, summary, prompt/response messages, and accessed-resource names/types into an evaluation string.
+1. Extract user-authored text into an evaluation string. Missing department, group, or approval metadata is unknown, not a violation.
 2. Evaluate the string against each versioned policy rule.
 3. Add the weight of every matched rule once.
 4. Cap the result at 100.
@@ -35,7 +35,7 @@ The seeded baseline policy version is `rules-2026.08.2`. From v0.9.0 onward, the
 | 20–39 | Low |
 | 0–19 | Informational |
 
-The seeded finding threshold is 40. An approved policy version can change it without rebuilding the application. Below-threshold content is not retained by JO AI Monitor; only minimal suppression metadata is recorded.
+The seeded finding threshold is 40. An approved policy version can change it without rebuilding the application. New below-threshold evidence records use minimal suppression metadata. Previously retained transcripts that fall below threshold after rescoring retain their original retention clock; they leave the review queue.
 
 ## Worked example
 

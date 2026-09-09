@@ -456,10 +456,30 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.10.11")
+                self.assertEqual(active.get("/health").json()["version"],"0.10.12")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+class LiveUsageIdentityTests(unittest.TestCase):
+    def test_user_section_uses_authorized_identity(self):
+        data={'user_report_schema':1,'top_users':[{'user':'Non Email Name','alias':'User-123','provider':'Claude Enterprise','volume':5}], 'executive_sections':[]}
+        for method,expected in [('entra','User-123'),('local','Non Email Name')]:
+            with patch.object(main,'current_identity',return_value={'method':method,'roles':set()}):
+                result=main.usage_for_identity(data,None)
+            self.assertEqual(result['executive_sections'][0]['rows'][1][0],expected)
+            if method=='entra':self.assertNotIn('Non Email Name',json.dumps(result))
+
+    def test_detailed_sources_and_license_roster_do_not_leak_names(self):
+        from app import purview_analytics, workbook_reporting
+        from datetime import datetime, timezone
+        begin=datetime(2026,8,1,tzinfo=timezone.utc);end=datetime(2026,9,1,tzinfo=timezone.utc)
+        data=purview_analytics.aggregate([{'id':'1','user':'Plain Name','date':'2026-08-02T00:00:00+00:00','app':'Word','raw_app':'Word','license_type':'Unknown','agent':None,'resources':0}],begin,end)
+        data['licensed_users']=[{'user':'Another Name','alias':'User ABC','last_activity':None}]
+        with patch.object(main,'current_identity',return_value={'method':'entra','roles':set()}):
+            result=main.usage_for_identity(data,None)
+        self.assertNotIn('Plain Name',json.dumps(result));self.assertNotIn('Another Name',json.dumps(result))
+        self.assertIn('Copilot Detail',[s['name'] for s in result['executive_sections']])

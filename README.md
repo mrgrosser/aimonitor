@@ -159,3 +159,11 @@ JO AI Monitor writes an append-only audit event for local and Entra sign-ins, fa
 Audit entries form a SHA-256 hash chain: every record includes the prior record's hash, and `/api/audit` verifies the chain before returning results. The **Access audit** navigation item displays the ledger and its current integrity status. Persist `DATABASE_PATH` on durable storage; Docker Compose maps it to `/data/jo-ai-monitor.db`.
 
 Version 0.9.5 can forward an explicitly approved subset of those audit events to a Rapid7 InsightIDR Custom Logs HTTPS webhook. Set `RAPID7_WEBHOOK_URL` as a deployment secret, then use **Settings → Rapid7 InsightIDR Custom Logs** to select categories and fields, preview the exact payload, send a test, and enable forwarding. Prompt, response, transcript, attachment, evidence, query, summary, and content fields are rejected by the server. The destination URL is never returned to the browser or stored in SQLite.
+
+## Organization usage by user
+
+Live Claude and Microsoft 365 Copilot reports open with a searchable **Usage by user** section. Claude includes all reported users with requests or tokens for the selected month. Copilot rolling reports include all returned licensed-user rows, including no recorded activity, with last activity and applications used in the window. Microsoft report membership is not a real-time license assignment inventory; identities can be concealed by tenant report privacy settings. Calendar-month aggregate Copilot history cannot reconstruct individual users.
+
+Claude uses the existing `read:analytics` access. Copilot uses Microsoft Graph application `Reports.Read.All` with admin consent and the v1.0 Copilot usage user detail report. This version does not supply per-user prompt counts, spend, or active-day counts; those remain unavailable. Named identities follow `USAGE_USER_DETAIL_ROLES`; restricted users receive aliases. Existing caches refresh to the new user-report schema during the next collector run.
+
+Full workbook coverage, optional Purview/department connectors, and source reconciliation findings are documented in [REPORTING_COVERAGE.md](REPORTING_COVERAGE.md). The workbook is the reporting reference; live imports remain disabled.

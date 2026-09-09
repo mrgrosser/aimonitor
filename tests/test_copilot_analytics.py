@@ -13,6 +13,8 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
         requests=[]
         def respond(request):
             requests.append(request)
+            if 'UsageUserDetail' in request.url.path:
+                return httpx.Response(200,json={'value':[{'userPrincipalName':'inactive@example.com','reportRefreshDate':'2026-09-06','reportPeriod':30}]})
             row={'anyAppActiveUsers':8,'anyAppEnabledUsers':12,'wordActiveUsers':5,'wordEnabledUsers':12}
             if 'Trend' in request.url.path:
                 data={'reportRefreshDate':'2026-09-06','reportPeriod':30,'adoptionByDate':[{'reportDate':'2026-09-05',**row}]}
@@ -21,6 +23,8 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
                 data=await analytics.collect(client,'test-token',30)
+        self.assertEqual(data['top_users'][0]['activity_status'],'No recorded activity in period')
+        self.assertIsNone(data['top_users'][0]['volume'])
         self.assertEqual(data['summary']['copilot_active_users'],8)
         self.assertNotIn('copilot_interactions',data['summary'])
         self.assertNotIn('claude_requests',data['summary'])
@@ -37,6 +41,8 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
         def respond(request):
             if request.url.params.get('$format') != 'text/csv':
                 return httpx.Response(400,json={'error':{'code':'UnknownError','message':'JSON format is not supported.'}})
+            if 'UsageUserDetail' in request.url.path:
+                return httpx.Response(200,text='Report Refresh Date,Report Period,User Principal Name,Last Activity Date\n2026-09-06,30,inactive@example.com,\n')
             header='Report Refresh Date,Report Period,Any App Active Users,Any App Enabled Users,Word Active Users'
             values='2026-09-06,30,8,12,5'
             if 'Trend' in request.url.path:
@@ -46,7 +52,7 @@ class CopilotAnalyticsTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
                 data=await analytics.collect(client,'test-token',30)
         self.assertEqual(data['summary']['copilot_active_users'],8)
-        self.assertEqual(data['copilot_user_trend'],[{'Date':'2026-09-05','Active users':8}])
+        self.assertEqual(data['copilot_user_trend'],[{'Date':'2026-09-05','Active users':8,'Enabled users':12}])
         self.assertEqual(data['copilot_adoption'][0]['name'],'Word')
 
     def test_csv_response(self):
@@ -108,3 +114,28 @@ class CollectorFailureTests(unittest.TestCase):
         response=httpx.Response(200,text='Report Refresh Date , Report Period , Any App Active Users \n 2026-09-06 , 30 , 8 \n')
         self.assertEqual(analytics.parse(response)[0]['reportPeriod'],'30')
         self.assertEqual(analytics.parse(response)[0]['anyAppActiveUsers'],'8')
+
+class UserCoverageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pagination_preserves_cursor_and_inactive_users(self):
+        def respond(request):
+            second=request.url.params.get('$skiptoken')=='next'
+            row={'userPrincipalName':'inactive' if second else 'active','reportRefreshDate':'2026-09-06',
+                 'reportPeriod':30,'lastActivityDate':'' if second else '2026-09-01','wordCopilotLastActivityDate':'' if second else '2026-09-01'}
+            body={'value':[row]}
+            if not second:body['@odata.nextLink']="https://graph.microsoft.com/v1.0/copilot/reports/getMicrosoft365CopilotUsageUserDetail(period='D30')?$skiptoken=next"
+            return httpx.Response(200,json=body)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
+                rows=analytics.user_rows(await analytics.fetch(client,'secret',30,detail=True),30,'2026-09-06')
+        self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0]['products'],['Word'])
+        self.assertEqual(rows[1]['activity_status'],'No recorded activity in period')
+
+    async def test_untrusted_pagination_rejected(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(200,json={'value':[],'@odata.nextLink':'https://evil.example/users'}))) as client:
+            with patch.object(analytics,'compliance_gate',return_value=ComplianceGate(interval=0)):
+                with self.assertRaises(ValueError):await analytics.fetch(client,'secret',30,detail=True)
+
+    def test_old_activity_is_not_active_in_period(self):
+        rows=analytics.user_rows([{'userPrincipalName':'old','reportRefreshDate':'2026-09-06','reportPeriod':7,'lastActivityDate':'2026-08-01'}],7,'2026-09-06')
+        self.assertEqual(rows[0]['activity_status'],'No recorded activity in period')

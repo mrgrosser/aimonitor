@@ -1,6 +1,6 @@
 """Monthly executive report import and Excel export (separate from evidence scoring)."""
 import io
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -16,7 +16,7 @@ def import_monthly(workbook, filename, alias):
         columns=data[start]; result=[]
         for row in data[start+1:]:
             if not row or row[0] is None: continue
-            if str(row[0]).strip().lower() in {"total","grand total"}: break
+            if str(row[0]).strip().lower() in {"total","grand total"} or str(row[0]).strip().lower().startswith("total "): break
             result.append(dict(zip(columns,row)))
         return columns,result
     summary_rows=rows("AI Usage Summary")
@@ -97,7 +97,10 @@ def executive_xlsx(data):
                 if cell.row<=len(formats) and cell.column<=len(formats[cell.row-1]): cell.number_format=formats[cell.row-1][cell.column-1] or "General"
                 if isinstance(cell.value,str):
                     try:
-                        if len(cell.value)>=19 and cell.value[10]=="T": cell.value=datetime.fromisoformat(cell.value)
+                        if len(cell.value)>=19 and cell.value[10]=="T":
+                            value=datetime.fromisoformat(cell.value)
+                            cell.value=value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+                            cell.number_format='yyyy-mm-dd hh:mm:ss "UTC"'
                     except ValueError: pass
                     if isinstance(cell.value,str): cell.data_type="s"  # Never execute imported formulas.
                 cell.font=Font(name="Calibri",size=11,color="FFFFFF" if is_heading else "172231",bold=bool(is_heading))
