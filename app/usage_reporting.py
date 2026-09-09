@@ -291,70 +291,77 @@ def monthly_copilot_metrics(data):
     return [['Measure','Value'],['Average daily active users',summary['copilot_average_daily_users']],['Peak daily active users',summary['copilot_peak_daily_users']],['Reported calendar days',f"{summary['copilot_reported_days']} of {summary['copilot_calendar_days']}"]]
 
 
+def summary_metrics(data):
+    monthly=monthly_copilot_metrics(data)
+    if monthly:return monthly
+    labels={'copilot_active_users':'Copilot active users','copilot_interactions':'Copilot interactions',
+        'agent_interactions':'Agent interactions','copilot_enabled_users':'Copilot enabled users',
+        'claude_active_users':'Claude active users','claude_requests':'Claude requests','claude_usage_spend':'Claude usage spend (USD)'}
+    return [['Measure','Value']]+[[label,report_value(data['summary'][key],money=key=='claude_usage_spend')] for key,label in labels.items() if key in data.get('summary',{})]
+
+
+def report_value(value,money=False):
+    if value is None:return 'Not supplied'
+    if isinstance(value,(int,float)):
+        return f'${value:,.2f}' if money else f'{value:,.2f}'.rstrip('0').rstrip('.') if isinstance(value,float) else f'{value:,}'
+    return str(value)
+
+
+def summary_tables(data):
+    tables=[]
+    for title,key,columns in [
+        ('Copilot applications','copilot_apps',[('Application','name'),('Interactions','interactions'),('Users','users')]),
+        ('Copilot adoption by app','copilot_adoption',[('Application','name'),('Active users','users'),('Enabled users','enabled')]),
+        ('Claude products','claude_products',[('Product','name'),('Requests','requests'),('Spend (USD)','spend')]),
+        ('Claude models','claude_models',[('Model','name'),('Requests','requests'),('Spend (USD)','spend')])]:
+        if data.get(key):tables.append((title,[[c[0] for c in columns]]+[[report_value(r.get(k),money=k=='spend') for _,k in columns] for r in data[key]]))
+    if data.get('department_adoption') is not None:
+        unit='Interactions' if 'copilot_interactions' in data.get('summary',{}) else 'Requests'
+        spend='claude_requests' in data.get('summary',{})
+        rows=[['Department','Headcount','Active users','Adoption',unit]+(['Spend (USD)'] if spend else [])]
+        for r in data['department_adoption']:
+            rows.append([r['Department'],report_value(r['Headcount']),report_value(r['Users']),f"{r['Adoption']:.1%}" if r['Adoption'] is not None else 'Not supplied',report_value(r['Volume'])]+([report_value(r['Spend (USD)'],money=True)] if spend else []))
+        tables.insert(0,('Department summary',rows))
+    for provider in ('Microsoft 365 Copilot','Claude Enterprise'):
+        users=sorted([r for r in data.get('top_users',[]) if r.get('provider')==provider],key=lambda r:r.get('volume') or 0,reverse=True)[:10]
+        if users:
+            unit='Interactions' if provider=='Microsoft 365 Copilot' else 'Requests'
+            tables.append((provider+' - top 10 by recorded volume',[['User','Department',unit]]+[[r['user'],r.get('department','Not supplied'),report_value(r.get('volume'))] for r in users]))
+    return tables
+
+
 def usage_pdf(data: dict[str, Any], actor: str, version: str) -> bytes:
-    from app.report_charts import accent
-    report_accent=accent(data)
-    stream=io.BytesIO(); styles=getSampleStyleSheet(); doc=SimpleDocTemplate(stream,pagesize=letter,rightMargin=.55*inch,leftMargin=.55*inch,topMargin=.55*inch,bottomMargin=.55*inch)
-    story=[Paragraph("JO AI Monitor - Usage & Spend Report",styles["Title"]),Paragraph(html.escape(str(data.get("period",""))),styles["Heading2"]),
-        Paragraph(f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by {html.escape(actor)} - JO AI Monitor {html.escape(version)}",styles["BodyText"]),Spacer(1,12)]
-    summary=data.get("summary",{}); licensing=data.get("licensing",{})
-    metrics=[["Measure","Value"],["Copilot active users",summary.get("copilot_active_users","Unavailable")],["Copilot interactions",summary.get("copilot_interactions","Unavailable")],
-        ["Claude active users",summary.get("claude_active_users","Unavailable")],["Claude API requests",summary.get("claude_requests","Unavailable")],
-        ["Claude usage spend",f"${_number(summary.get('claude_usage_spend')):,.2f}" if "claude_usage_spend" in summary else "Unavailable"],["Estimated monthly run rate",f"${_number(licensing.get('estimated_monthly_run_rate')):,.2f}" if "estimated_monthly_run_rate" in licensing else "Not supplied"],
-        ["Unassigned Claude seats",licensing.get("claude_seats_unassigned","Not supplied")]]
-    metrics=monthly_copilot_metrics(data) or metrics
-    table=Table(metrics,colWidths=[3.6*inch,2.6*inch]); table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#172231")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#D8DEE6")),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F6F8FA")]),("PADDING",(0,0),(-1,-1),7)])); story += [table,Spacer(1,14)]
-    from app.report_charts import pdf_charts
+    from app.report_charts import pdf_charts,accent
+    stream=io.BytesIO();styles=getSampleStyleSheet()
+    styles['BodyText'].fontSize=9;styles['BodyText'].leading=12
+    doc=SimpleDocTemplate(stream,pagesize=letter,rightMargin=40,leftMargin=40,topMargin=35,bottomMargin=35)
+    story=[Paragraph('JO AI Monitor - Usage Summary',styles['Title']),Paragraph(html.escape(str(data.get('period',''))),styles['Heading2']),Paragraph(html.escape(f'Generated by {actor} - {version}'),styles['BodyText'])]
+    for title,rows in [('Summary',summary_metrics(data)),*summary_tables(data)]:
+        story.append(Paragraph(html.escape(title),styles['Heading2']))
+        values=[[Paragraph(html.escape(str(v)),styles['BodyText']) for v in row] for row in rows]
+        count=len(rows[0]);widths=[190]+[(342)/(count-1)]*(count-1)
+        t=Table(values,repeatRows=1,colWidths=widths,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#E4EBF5')),('VALIGN',(0,0),(-1,-1),'TOP'),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#D8DEE6')),('PADDING',(0,0),(-1,-1),6)]))
+        story.extend([t,Spacer(1,10)])
     drawings=pdf_charts(data)
-    if drawings: story += [PageBreak(),Paragraph("Usage at a glance",styles["Heading2"]),*drawings,PageBreak()]
-    for title,rows,columns in [("Claude products",data.get("claude_products",[]),[("Product","name"),("Requests","requests"),("Spend","spend")]),
-            ("Claude models",data.get("claude_models",[]),[("Model","name"),("Requests","requests"),("Spend","spend")]),
-            ("Copilot applications",data.get("copilot_apps",[]),[("Application","name"),("Interactions","interactions"),("Users","users")])]:
-        if not rows:continue
-        if title == "Copilot applications": story.append(PageBreak())
-        story.append(Paragraph(title,styles["Heading2"])); values=[[x[0] for x in columns]]+[[f"${_number(row.get(key)):,.2f}" if key == "spend" else row.get(key,"") for _,key in columns] for row in rows]
-        t=Table(values,repeatRows=1,colWidths=[3.5*inch,1.35*inch,1.35*inch]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor(report_accent)),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D8DEE6")),("PADDING",(0,0),(-1,-1),6)])); story += [t,Spacer(1,12)]
-    extra=[("Copilot users by app",data.get("copilot_adoption",[]),[("App","name"),("Active users","users"),("Enabled users","enabled")]),("Copilot active user trend",data.get("copilot_user_trend",[]),[("Date","Date"),("Active users","Active users"),("Enabled users","Enabled users")]),("Department adoption",data.get("departments",[]),[("Department","Department"),("Headcount","Headcount"),("Copilot users","Copilot users"),("Claude users","Claude users")]),
-        ("Copilot agents",data.get("copilot_agents",[]),[("Agent","Agent"),("Interactions","Interactions"),("Users","Users")]),
-        ("Copilot daily trend",data.get("copilot_daily",[]),[("Date","Date"),("Interactions","Interactions"),("Users","Active users")])]
-    for provider in ("Microsoft 365 Copilot","Claude Enterprise"):
-        selected=sorted([r for r in data.get("top_users",[]) if r.get("provider")==provider],key=lambda r:r.get("volume") or 0,reverse=True)[:10]
-        extra.append((provider+" — top 10 by recorded volume",selected,[("User","user"),("Department","department"),("Volume","volume")]))
-    for title,items,columns in extra:
-        if not items: continue
-        story.extend([PageBreak(),Paragraph(html.escape(title),styles["Heading2"])])
-        values=[[Paragraph(html.escape(label),styles["BodyText"]) for label,_ in columns]]
-        values.extend([[Paragraph(html.escape(str(row.get(key) if row.get(key) is not None else "Not supplied")),styles["BodyText"]) for _,key in columns] for row in items])
-        widths=[2.8*inch]+[(3.4*inch)/(len(columns)-1)]*(len(columns)-1)
-        t=Table(values,repeatRows=1,colWidths=widths)
-        t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E4EBF5")),("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D8DEE6")),("PADDING",(0,0),(-1,-1),6)]))
-        story.append(t)
-    story.append(Spacer(1,12))
-    story.append(Paragraph(html.escape(str(data.get("source",""))),styles["BodyText"]))
-    story.append(Paragraph("Governance notes",styles["Heading2"]));
-    for note in data.get("caveats",[]): story.append(Paragraph(f"- {html.escape(str(note))}",styles["BodyText"]))
-    def footer(canvas, document):
-        canvas.saveState(); canvas.setFont("Helvetica",8); canvas.setFillColor(colors.HexColor("#697386"));
-        canvas.drawString(.55*inch,.32*inch,f"JO AI Monitor {version}"); canvas.drawRightString(7.95*inch,.32*inch,f"Page {document.page}"); canvas.restoreState()
-    doc.build(story,onFirstPage=footer,onLaterPages=footer); return stream.getvalue()
+    if drawings:story.extend([PageBreak(),Paragraph('Usage at a glance',styles['Heading2']),*drawings])
+    story.append(Paragraph('Report scope',styles['Heading2']))
+    for note in ['Summary report. Full user lists and individual records are available in Download Excel and the on-screen detail sections.',*data.get('caveats',[])]:story.append(Paragraph(html.escape(str(note)),styles['BodyText']))
+    def footer(canvas,document):
+        canvas.setFont('Helvetica',8);canvas.drawString(40,20,f'JO AI Monitor {version}');canvas.drawRightString(572,20,f'Page {document.page}')
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    return stream.getvalue()
 
 
 def usage_html(data: dict[str, Any], actor: str, version: str) -> str:
-    s=data.get("summary",{}); l=data.get("licensing",{})
-    def rows(items,cols): return "".join("<tr>"+"".join(f"<td>{html.escape(str(x.get(c,'')))}</td>" for c in cols)+"</tr>" for x in items)
-    from app.report_charts import charts_html, CHART_CSS
-    sections=""
-    for section in data.get("executive_sections",[]):
-        if section["name"] in {"Copilot Detail","Claude Detail"} and not data.get("user_report_schema"): continue
-        section_rows="".join("<tr>"+"".join(f"<td>{html.escape(str(v if v is not None else ''))}</td>" for v in row)+"</tr>" for row in section["rows"])
-        sections+=f"<h2>{html.escape(section['name'])}</h2><table>{section_rows}</table>"
-    rendered=f"""<!doctype html><html><head><meta charset='utf-8'><title>JO AI Monitor Report</title><style>body{{font:14px Arial;color:#172231;border-top:6px solid #3865e8;max-width:1000px;margin:36px auto;padding:0 20px}}h1{{margin-bottom:2px}}.meta{{color:#697386}}.cards{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}}.card{{border:1px solid #dce1e6;padding:22px;border-radius:12px;background:linear-gradient(135deg,#eef3ff,#fff)}}.card b{{display:block;font-size:30px;color:#315fdc;margin-top:10px;font-variant-numeric:tabular-nums}}table{{width:100%;border-collapse:collapse;margin:8px 0 24px}}th,td{{border-bottom:1px solid #e4e7eb;padding:8px;text-align:left}}th{{background:#172231;color:#fff}}@media print{{button{{display:none}}body{{margin:0}}}}{CHART_CSS}</style></head><body><button onclick='print()'>Print / Save PDF</button><h1>JO AI Monitor</h1><h2>Usage &amp; Spend Report</h2><p class='meta'>{html.escape(str(data.get('period','')))} · Generated by {html.escape(actor)} · {html.escape(version)}</p><div class='cards'><div class='card'>Copilot interactions<b>{format(_integer(s['copilot_interactions']),',') if 'copilot_interactions' in s else 'Unavailable'}</b></div><div class='card'>Claude requests<b>{format(_integer(s['claude_requests']),',') if 'claude_requests' in s else 'Unavailable'}</b></div><div class='card'>Claude spend<b>{('$'+format(_number(s['claude_usage_spend']),',.2f')) if 'claude_usage_spend' in s else 'Unavailable'}</b></div><div class='card'>Monthly run rate<b>${format(_number(l.get('estimated_monthly_run_rate')), ',.2f') if 'estimated_monthly_run_rate' in l else '—'}</b></div></div>{charts_html(data)}<h2>Claude products</h2><table><tr><th>Product</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_products',[]),['name','requests','spend'])}</table><h2>Claude models</h2><table><tr><th>Model</th><th>Requests</th><th>Spend</th></tr>{rows(data.get('claude_models',[]),['name','requests','spend'])}</table><h2>Copilot applications</h2><table><tr><th>Application</th><th>Interactions</th><th>Users</th></tr>{rows(data.get('copilot_apps',[]),['name','interactions','users'])}</table>{sections}<p>{html.escape(" ".join(data.get("caveats",[])))}</p></body></html>"""
-
-    monthly=monthly_copilot_metrics(data)
-    if monthly:
-        start=rendered.index("<div class='cards'>")
-        end=rendered.index('</div></div>',start)+len('</div></div>')
-        cards="<div class='cards'>"+''.join("<div class='card'>"+html.escape(str(label))+"<b>"+html.escape(str(value))+"</b></div>" for label,value in monthly[1:])+"</div>"
-        rendered=rendered[:start]+cards+rendered[end:]
-    from app.report_charts import accent
-    return rendered.replace("#3865e8",accent(data)).replace("#315fdc",accent(data)).replace("#eef3ff","#fff5ef" if accent(data)=="#c56645" else "#edf9f5")
+    from app.report_charts import charts_html,CHART_CSS,accent
+    def table(title,rows):
+        head='<thead><tr>'+''.join('<th>'+html.escape(str(v))+'</th>' for v in rows[0])+'</tr></thead>'
+        body='<tbody>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows[1:])+'</tbody>'
+        return '<section><h2>'+html.escape(title)+'</h2><table>'+head+body+'</table></section>'
+    sections=''.join(table(title,rows) for title,rows in summary_tables(data))
+    cards=''.join('<div class="card">'+html.escape(str(label))+'<b>'+html.escape(str(value))+'</b></div>' for label,value in summary_metrics(data)[1:])
+    notes=''.join('<li>'+html.escape(str(note))+'</li>' for note in data.get('caveats',[]))
+    return f"""<!doctype html><html><head><meta charset='utf-8'><title>JO AI Monitor Usage Summary</title><style>
+    body{{font:13px Arial;color:#172231;border-top:5px solid {accent(data)};max-width:1000px;margin:24px auto;padding:0 20px}}h1{{margin-bottom:4px}}h2{{font-size:18px;break-after:avoid}}.meta{{color:#697386}}.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}}.card{{flex:1;border:1px solid #dce1e6;padding:16px;border-radius:8px}}.card b{{display:block;font-size:26px;color:{accent(data)};margin-top:8px}}table{{width:100%;border-collapse:collapse;margin-bottom:18px;table-layout:fixed}}th,td{{padding:7px;text-align:left;border-bottom:1px solid #dce1e6;overflow-wrap:anywhere}}th{{background:#e4ebf5}}thead{{display:table-header-group}}tr{{break-inside:avoid}}@media print{{button{{display:none}}body{{margin:0;padding:0}}@page{{size:A4;margin:14mm}}}}{CHART_CSS}</style></head><body>
+    <button onclick='print()'>Print / Save PDF</button><h1>JO AI Monitor</h1><h2>Usage Summary</h2><p class='meta'>{html.escape(str(data.get('period','')))} - Generated by {html.escape(actor)} - {html.escape(version)}</p><div class='cards'>{cards}</div>{charts_html(data)}{sections}<h2>Report scope</h2><p>Summary report. Full user lists and individual records are available in Download Excel and the on-screen detail sections.</p><ul>{notes}</ul></body></html>"""

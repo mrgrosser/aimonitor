@@ -76,7 +76,7 @@ class AnalyticsCacheTests(unittest.IsolatedAsyncioTestCase):
         from app.usage_reporting import usage_pdf,usage_html
         data={'mode':'live','period':'2026-08','summary':{'claude_requests':10,'claude_usage_spend':5},'claude_daily':[{'Date':'2026-08-01','Requests':10}], 'claude_products':[{'name':'chat','requests':10,'spend':5}],'executive_sections':[{'name':'Claude Daily Trend','rows':[['Date','Requests'],['2026-08-01',10]]}]}
         self.assertTrue(usage_pdf(data,'test','test').startswith(b'%PDF'))
-        self.assertIn('Unavailable',usage_html(data,'test','test'))
+        self.assertNotIn('Copilot interactions',usage_html(data,'test','test'))
         workbook=load_workbook(io.BytesIO(executive_xlsx(data)))
         self.assertEqual(len(workbook['Claude Daily Trend']._charts),1)
 

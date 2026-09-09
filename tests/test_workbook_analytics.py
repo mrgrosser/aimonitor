@@ -38,7 +38,7 @@ class WorkbookAnalyticsTests(unittest.TestCase):
         book=load_workbook(io.BytesIO(executive_xlsx(result)))
         self.assertEqual(book['Copilot Detail'].max_row,3);book.close()
         self.assertIn('Copilot Detail',usage_csv(result).decode('utf-8-sig'))
-        self.assertIn('Copilot Detail',usage_html(result,'tester','test'))
+        self.assertNotIn('<h2>Copilot Detail</h2>',usage_html(result,'tester','test'))
 
     def test_conflicting_duplicate_rejected(self):
         with self.assertRaises(ValueError):p.aggregate([p.normalize(event()),p.normalize(event(app='Word'))],START,END)
@@ -115,3 +115,18 @@ class PurviewDiagnosticTests(unittest.TestCase):
         message=p.http_failure(httpx.HTTPStatusError('failure',request=request,response=response))
         self.assertIn('configured Microsoft credentials',message)
         self.assertNotIn('AuditLogsQuery.Read.All',message)
+
+
+class SummaryReportTests(unittest.TestCase):
+    def test_summary_excludes_raw_records_and_formats_departments(self):
+        from app.usage_reporting import summary_tables
+        data={'summary':{'copilot_interactions':5000,'copilot_active_users':1},
+            'executive_sections':[{'name':'Copilot Detail','rows':[['User'],*[[f'raw-{i}'] for i in range(5000)]]}],
+            'department_adoption':[{'Department':'Sales','Headcount':10,'Users':1,'Adoption':.1,'Volume':5000,'Spend (USD)':None}]}
+        rendered=usage_html(data,'tester','test')
+        self.assertNotIn('raw-4999',rendered)
+        self.assertNotIn('Claude',rendered)
+        self.assertIn('Department summary',rendered)
+        self.assertIn('10.0%',rendered)
+        self.assertLess(len(rendered),10000)
+        self.assertNotIn('Spend (USD)',str(summary_tables(data)))

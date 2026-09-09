@@ -63,3 +63,10 @@ M365_PURVIEW_MONTHS=1
 ```
 
 Use the existing Microsoft application credentials, with application `AuditLogsQuery.Read.All` granted admin consent. Keep the existing licensed-user collector enabled. The additional audit collector supplies observed interactions across returned users. Check Usage/Reports collection status for a completed Copilot monthly report; queries are asynchronous. Compare a matching UTC interval with the audit export. Increase months only after the first successful collection. Directory enrichment is optional and separately requires `User.Read.All`.
+
+
+## 0.10.13 summary exports and departments
+
+PDF and Print report now contain provider-specific metrics, charts, department summary when available, product/application summaries, and at most ten users per provider. Individual interaction records and full user lists remain in Download Excel, CSV/JSON, and on-screen sections; they are excluded from summary printouts.
+
+To enable department summaries, grant Microsoft Graph application `User.Read.All` with admin consent and set `USAGE_DIRECTORY_ENABLED=true` in the deployed environment, then restart. The existing Microsoft credentials are reused. Enabled Entra accounts are matched to Claude and Copilot usage by email or userPrincipalName. The report labels the directory observation date; applying today's directory to an older month does not establish historical department membership. Unmatched users remain unmapped.
