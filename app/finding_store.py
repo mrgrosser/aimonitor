@@ -1,6 +1,6 @@
 import json
 import os
-import sqlite3
+from app import database as db_backend
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,9 +15,10 @@ RETENTION_DAYS = max(0, int(os.getenv("FINDING_RETENTION_DAYS", "180")))
 def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
 
+@db_backend.initialize_once
 def init_finding_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    if not db_backend.is_postgres(): DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with closing(db_backend.connect(DB_PATH)) as db:
         db.execute("""CREATE TABLE IF NOT EXISTS findings (
             id TEXT PRIMARY KEY, provider TEXT NOT NULL, surface TEXT, user_id TEXT, user_email TEXT,
             title TEXT, created_at TEXT, updated_at TEXT, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
@@ -31,13 +32,15 @@ def init_finding_db() -> None:
 def upsert_finding(item: dict[str, Any], provider: str) -> bool:
     """Store a scored, promoted finding. Returns True when the finding is new."""
     init_finding_db(); user=item.get("user") or {}; now=_now()
-    with closing(sqlite3.connect(DB_PATH)) as db:
-        db.execute("BEGIN IMMEDIATE")
+    with closing(db_backend.connect(DB_PATH)) as db:
+        db.lock("finding_store")
         if db.execute("SELECT 1 FROM expired_findings WHERE id=?", (item.get("id"),)).fetchone():
             return False
         row=db.execute("SELECT first_seen_at FROM findings WHERE id=?",(item.get("id"),)).fetchone()
-        db.execute("""INSERT OR REPLACE INTO findings(id,provider,surface,user_id,user_email,title,created_at,updated_at,
-            first_seen_at,last_seen_at,risk,risk_score,policy_version,promoted,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        db.execute("""INSERT INTO findings(id,provider,surface,user_id,user_email,title,created_at,updated_at,
+            first_seen_at,last_seen_at,risk,risk_score,policy_version,promoted,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (id) DO UPDATE SET
+                provider=excluded.provider,surface=excluded.surface,user_id=excluded.user_id,user_email=excluded.user_email,title=excluded.title,created_at=excluded.created_at,updated_at=excluded.updated_at,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,risk=excluded.risk,risk_score=excluded.risk_score,policy_version=excluded.policy_version,promoted=excluded.promoted,evidence_json=excluded.evidence_json""",
             (item.get("id"),provider,item.get("surface"),user.get("id"),user.get("email"),item.get("title"),
              item.get("created_at"),item.get("updated_at"),row[0] if row else now,now,item.get("risk"),
              int(item.get("risk_score") or 0),item.get("risk_rule_version") or "unknown",int(item.get("promoted",True)),json.dumps(item,separators=(",",":"))))
@@ -47,19 +50,19 @@ def upsert_finding(item: dict[str, Any], provider: str) -> bool:
 
 def delete_finding(finding_id: str) -> None:
     init_finding_db()
-    with closing(sqlite3.connect(DB_PATH)) as db: db.execute("DELETE FROM findings WHERE id=?",(finding_id,)); db.commit()
+    with closing(db_backend.connect(DB_PATH)) as db: db.execute("DELETE FROM findings WHERE id=?",(finding_id,)); db.commit()
 
 
 def get_finding(finding_id: str) -> dict[str, Any] | None:
     init_finding_db()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         row=db.execute("SELECT evidence_json FROM findings WHERE id=?",(finding_id,)).fetchone()
     return json.loads(row[0]) if row else None
 
 
 def list_findings(include_suppressed: bool = False) -> list[dict[str, Any]]:
     init_finding_db()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         rows=db.execute("SELECT evidence_json FROM findings" + ("" if include_suppressed else " WHERE promoted=1") + " ORDER BY created_at DESC").fetchall()
     return [json.loads(x[0]) for x in rows]
 
@@ -68,7 +71,7 @@ def known_versions() -> dict[str, tuple[str, str]]:
     """Provider item id -> (provider updated_at, policy version) across stored findings and
     suppressed metadata, so the sync only rehydrates new or changed evidence."""
     init_finding_db(); result: dict[str, tuple[str, str]] = {}
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         for id_,updated,version,evidence in db.execute("SELECT id,updated_at,policy_version,evidence_json FROM findings"):
             # Legacy normalized records lacked provider, so their scoped score is stale.
             if not json.loads(evidence).get("provider") or json.loads(evidence).get("risk_pipeline_version") != PIPELINE_VERSION:
@@ -91,14 +94,14 @@ def known_versions() -> dict[str, tuple[str, str]]:
                     if due.tzinfo is None: due = due.replace(tzinfo=timezone.utc)
                     if due <= datetime.now(timezone.utc): continue
                 result.setdefault(id_,(updated or "",version))
-        except sqlite3.OperationalError: pass
+        except db_backend.OperationalError: pass
     return result
 
 
 def touch_seen(ids: list[str]) -> None:
     if not ids: return
     init_finding_db(); now=_now()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         for start in range(0,len(ids),500):
             chunk=ids[start:start+500]
             db.execute(f"UPDATE findings SET last_seen_at=? WHERE id IN ({','.join('?'*len(chunk))})",[now,*chunk])
@@ -108,7 +111,7 @@ def touch_seen(ids: list[str]) -> None:
 def expired_finding_ids() -> set[str]:
     """Minimal tombstones prevent provider history from restarting retention."""
     init_finding_db()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         return {row[0] for row in db.execute("SELECT id FROM expired_findings")}
 
 
@@ -116,9 +119,9 @@ def prune_findings(retention_days: int | None = None) -> int:
     days=RETENTION_DAYS if retention_days is None else retention_days
     if not days: return 0
     init_finding_db(); cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
-    with closing(sqlite3.connect(DB_PATH)) as db:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT OR IGNORE INTO expired_findings(id,expired_at) SELECT id,? FROM findings WHERE first_seen_at<?", (_now(),cutoff))
+    with closing(db_backend.connect(DB_PATH)) as db:
+        db.lock("finding_store")
+        db.execute('INSERT INTO expired_findings(id,expired_at) SELECT id,? FROM findings WHERE first_seen_at<? ON CONFLICT DO NOTHING', (_now(),cutoff))
         cur=db.execute("DELETE FROM findings WHERE first_seen_at<?",(cutoff,)); db.commit()
     return cur.rowcount
 

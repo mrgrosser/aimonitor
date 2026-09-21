@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+from app import database as db_backend
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import httpx
@@ -10,8 +11,15 @@ from app.purview_analytics import database, graph_pages, GRAPH
 status={'state':'not_configured','message':'Department directory snapshots are not enabled'}
 
 
+@db_backend.initialize_once
+def init_directory_db():
+    with closing(database()) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS usage_directory (collected_at TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+        db.commit()
+
+
 def init_table(db):
-    db.execute('CREATE TABLE IF NOT EXISTS usage_directory (collected_at TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+    init_directory_db()
 
 
 def save(rows,stamp):
@@ -24,7 +32,7 @@ def save(rows,stamp):
         clean.append({'id':uid,'upn':str(row.get('userPrincipalName') or '').lower(),
             'mail':str(row.get('mail') or '').lower(),'department':row.get('department') or '(no department)'})
     with closing(database()) as db:
-        init_table(db);db.execute('INSERT OR REPLACE INTO usage_directory VALUES (?,?)',(stamp,json.dumps(clean)));db.commit()
+        init_table(db);db.execute('INSERT INTO usage_directory VALUES (?,?) ON CONFLICT (collected_at) DO UPDATE SET payload=excluded.payload',(stamp,json.dumps(clean)));db.commit()
 
 
 def snapshot(end):

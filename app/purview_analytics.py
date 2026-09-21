@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
+from app import database as db_backend
 from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -21,11 +21,17 @@ APP_NAMES={'Office':'Microsoft 365 Copilot app','m365copilot':'Microsoft 365 Cop
            'OutlookSidepane':'Outlook','Microsoft Teams':'Teams'}
 
 
+@db_backend.initialize_once
+def init_analytics_db():
+    with closing(db_backend.connect(usage_reporting.DB_PATH,timeout=30)) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS purview_reports (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS purview_jobs (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+        db.commit()
+
+
 def database():
-    db=sqlite3.connect(usage_reporting.DB_PATH,timeout=30)
-    db.execute('CREATE TABLE IF NOT EXISTS purview_reports (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
-    db.execute('CREATE TABLE IF NOT EXISTS purview_jobs (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
-    return db
+    init_analytics_db()
+    return db_backend.connect(usage_reporting.DB_PATH,timeout=30)
 
 
 def saved(period):
@@ -128,7 +134,7 @@ async def collect_step(client,token,start,end):
         response.raise_for_status()
         job={'id':response.json()['id'],'start':start.isoformat(),'end':end.isoformat()}
         with closing(database()) as db:
-            db.execute('INSERT OR REPLACE INTO purview_jobs VALUES (?,?)',(period,json.dumps(job)));db.commit()
+            db.execute('INSERT INTO purview_jobs VALUES (?,?) ON CONFLICT (period) DO UPDATE SET payload=excluded.payload',(period,json.dumps(job)));db.commit()
         return False
     path='/security/auditLog/queries/'+quote(job['id'],safe='')
     status.update(stage='check audit query',period=period)
@@ -144,7 +150,7 @@ async def collect_step(client,token,start,end):
     status.update(stage='aggregate audit records',period=period)
     data=aggregate(rows,datetime.fromisoformat(job['start']),datetime.fromisoformat(job['end']))
     with closing(database()) as db:
-        db.execute('INSERT OR REPLACE INTO purview_reports VALUES (?,?)',(period,json.dumps(data)))
+        db.execute('INSERT INTO purview_reports VALUES (?,?) ON CONFLICT (period) DO UPDATE SET payload=excluded.payload',(period,json.dumps(data)))
         db.execute('DELETE FROM purview_jobs WHERE period=?',(period,));db.commit()
     return True
 

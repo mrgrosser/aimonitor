@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+from contextlib import closing
 from .compliance_http import compliance_gate
 import base64
 import asyncio
@@ -28,6 +29,7 @@ from app.finding_reporting import REPORT_ROLES, create_schedule, delete_schedule
 from app.case_management import add_comment, add_note, bulk_update, case_pdf, create_case, delete_queue, get_attachment, get_case, init_case_db, link_finding, list_cases, list_queues, save_attachment, save_queue, set_legal_hold, update_case
 from app.policy_management import active_policy, activate_policy, approve_policy, create_draft, get_policy, init_policy_db, list_policies, rollback_policy, update_draft
 from app.alert_management import expire_suppressions, alert_timeline, connector_health, create_alert, get_alert, init_alert_db, list_alerts, list_deliveries, process_deliveries, queue_delivery, update_alert
+from app import provider_store, database, schema
 from app import claude_analytics, copilot_analytics, purview_analytics, usage_directory, workbook_reporting
 from app.governance_analytics import correlate_findings, usage_alerts
 from app.finding_store import expired_finding_ids, delete_finding, get_finding, init_finding_db, known_versions, list_findings, prune_findings, rescore_findings, touch_seen, upsert_finding
@@ -40,7 +42,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.10.13")
+APP_VERSION = os.getenv("APP_VERSION", "0.11.0")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -95,14 +97,8 @@ _graph_token: dict[str, Any] = {}
 app = FastAPI(title="JO AI Monitor", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET.decode(errors="ignore"), session_cookie="jo_oauth", max_age=600, same_site="lax", https_only=COOKIE_SECURE)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
-init_db()
-init_usage_db()
-init_reporting_db()
-init_case_db()
-init_policy_db()
-init_alert_db()
-init_rapid7_db()
-init_finding_db()
+database.require_legacy_migration()
+schema.initialize()
 _alert_worker: asyncio.Task | None = None
 
 @app.on_event("startup")
@@ -277,7 +273,7 @@ async def graph_get(url: str) -> dict[str, Any]:
     token=await graph_token()
     async with httpx.AsyncClient(timeout=45) as client:
         res=await client.get(url if url.startswith("https://") else f"https://graph.microsoft.com/v1.0{url}", headers={"Authorization":f"Bearer {token}"})
-    if res.status_code >= 400: raise HTTPException(res.status_code, f"Microsoft Graph: {res.text[:500]}")
+    if res.status_code >= 400: raise HTTPException(502, f"Microsoft Graph returned HTTP {res.status_code}; collection will retry")
     return res.json()
 
 async def m365_users() -> list[dict[str,str]]:
@@ -405,11 +401,21 @@ async def anthropic_get(path: str, params: list[tuple[str, str]] | None = None) 
     async with httpx.AsyncClient(timeout=30) as client:
         res = await compliance_gate().get(client, f"{BASE_URL}{path}", params=params, headers={"x-api-key": API_KEY})
     if res.status_code >= 400:
-        raise HTTPException(res.status_code, f"Claude Compliance API returned HTTP {res.status_code}")
+        raise HTTPException(502, f"Claude Compliance API returned HTTP {res.status_code}; collection will retry")
     return res.json()
 
+@app.get("/ready")
+def ready():
+    try:
+        with closing(database.connect()) as db:
+            db.execute("SELECT 1").fetchone()
+    except Exception:
+        return JSONResponse({"status":"unavailable","database":"postgresql"}, status_code=503)
+    return {"status":"ok","database":"postgresql" if database.is_postgres() else "sqlite-demo"}
+
+
 @app.get("/health")
-def health(): return {"status":"ok","version":APP_VERSION,"mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED,"usage_reporting_enabled":True}
+def health(): return {"status":"ok","database":"postgresql" if database.is_postgres() else "sqlite-demo","version":APP_VERSION,"mode":"demo" if DEMO else "live","entra_enabled":ENTRA_ENABLED,"m365_copilot_enabled":M365_ENABLED,"usage_reporting_enabled":True}
 
 @app.get("/")
 def index(): return FileResponse(ROOT / "static" / "index.html")
@@ -816,18 +822,55 @@ def investigation_export(case_id: int, request: Request, report_format: str = Qu
     audit(user,"case_exported","investigation_case",str(case_id),request.client.host if request.client else "",request.headers.get("user-agent",""),{"format":report_format})
     return Response(payload,media_type=media,headers={"Content-Disposition":f'attachment; filename="jo-ai-monitor-case-{case_id}.{ext}"',"Cache-Control":"no-store"})
 
+_provider_views_worker = None
+
+
+async def sync_provider_views():
+    for name, path, params in (
+        ("activities", "/v1/compliance/activities", [("limit", "5000")]),
+        ("organizations", "/v1/compliance/organizations", None),
+    ):
+        try:
+            payload = await anthropic_get(path, params)
+            if not isinstance(payload.get("data"), list):
+                raise ValueError("Invalid provider response")
+            await asyncio.to_thread(provider_store.save, name, payload)
+        except Exception:
+            await asyncio.to_thread(provider_store.fail, name)
+
+
+@app.on_event("startup")
+async def start_provider_views():
+    global _provider_views_worker
+    if DEMO or not API_KEY: return
+    async def run():
+        while True:
+            await sync_provider_views()
+            await asyncio.sleep(300)
+    _provider_views_worker = asyncio.create_task(run())
+
+
+@app.on_event("shutdown")
+async def stop_provider_views():
+    if _provider_views_worker:
+        _provider_views_worker.cancel()
+        try: await _provider_views_worker
+        except asyncio.CancelledError: pass
+
+
 @app.get("/api/activities")
 async def activities(request: Request, limit: int = 100, user: str = Depends(current_user)):
     audit(user,"activity_feed_viewed","activity_feed",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"limit":limit})
     if DEMO:
         return {"data":[{"id":"activity_demo_"+str(i),"created_at":x["created_at"],"type":"claude_chat_created" if x["kind"]=="chat" else "session_created","actor":{"type":"user_actor","email_address":x["user"]["email"]},"resource_id":x["id"]} for i,x in enumerate(DEMO_CASES)]}
-    return await anthropic_get("/v1/compliance/activities", [("limit",str(min(limit,5000)))])
+    result = await asyncio.to_thread(provider_store.read, "activities")
+    return {**result, "data": result["data"][:max(1, min(limit, 5000))]}
 
 @app.get("/api/organizations")
 async def organizations(request: Request, user: str = Depends(current_user)):
     audit(user,"directory_viewed","directory",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""))
     if DEMO: return {"data":[{"id":"org_demo","uuid":"91012d09-e48b-438e-a489-1bebfd8fa6f9","name":"Northstar Labs","type":"claude_ai"}]}
-    return await anthropic_get("/v1/compliance/organizations")
+    return await asyncio.to_thread(provider_store.read, "organizations")
 
 @app.get("/api/providers")
 def providers(request: Request, user: str = Depends(current_user)):

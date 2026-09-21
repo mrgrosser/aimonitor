@@ -22,7 +22,7 @@ class Rapid7ExportTests(unittest.TestCase):
         self.enable()
         entry={"entry_hash":"hash-1","created_at":"2026-09-03T12:00:00Z","actor":"admin","action":"login_succeeded","object_type":"session","object_id":"","source_ip":"10.0.0.1","details":{"prompt":"never export"}}
         self.assertTrue(rapid7.enqueue_audit_event(entry)); self.assertFalse(rapid7.enqueue_audit_event(entry))
-        db=rapid7.sqlite3.connect(rapid7.DB_PATH)
+        db=rapid7.db_backend.connect(rapid7.DB_PATH)
         try: payload=rapid7.json.loads(db.execute("SELECT payload_json FROM rapid7_outbox").fetchone()[0])
         finally: db.close()
         self.assertNotIn("details",payload); self.assertNotIn("prompt",str(payload)); self.assertEqual(payload["category"],"authentication")
@@ -35,7 +35,7 @@ class Rapid7ExportTests(unittest.TestCase):
     def test_stuck_processing_rows_are_reclaimed_after_staleness(self):
         self.enable(); rapid7.enqueue_audit_event({"entry_hash":"hash-stuck","created_at":"2026-09-03T12:00:00Z","actor":"admin","action":"login_succeeded","object_type":"session","source_ip":""})
         stale=(rapid7.datetime.now(rapid7.timezone.utc)-rapid7.timedelta(seconds=rapid7.PROCESSING_STALE_SECONDS+60)).isoformat()
-        db=rapid7.sqlite3.connect(rapid7.DB_PATH)
+        db=rapid7.db_backend.connect(rapid7.DB_PATH)
         try: db.execute("UPDATE rapid7_outbox SET status='processing',last_attempt_at=?",(stale,)); db.commit()
         finally: db.close()
         with patch.object(rapid7,"_post") as post: result=rapid7.process_outbox()

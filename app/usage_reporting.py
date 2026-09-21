@@ -7,7 +7,7 @@ import io
 import json
 import os
 import re
-import sqlite3
+from app import database as db_backend
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,9 +26,10 @@ MAX_IMPORT_BYTES = 12 * 1024 * 1024
 ANONYMIZATION_KEY = (os.getenv("USAGE_ANONYMIZATION_KEY") or os.getenv("SESSION_SECRET") or "jo-ai-monitor-development-key").encode()
 
 
+@db_backend.initialize_once
 def init_usage_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    if not db_backend.is_postgres(): DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with closing(db_backend.connect(DB_PATH)) as db:
         db.execute("""CREATE TABLE IF NOT EXISTS usage_periods (
             period TEXT PRIMARY KEY, data_json TEXT NOT NULL, source_name TEXT NOT NULL,
             source_hash TEXT NOT NULL UNIQUE, imported_at TEXT NOT NULL, imported_by TEXT NOT NULL)""")
@@ -232,19 +233,21 @@ def parse_usage_file(content: bytes, filename: str) -> tuple[dict[str, Any], str
 
 def save_usage_period(data: dict[str, Any], source_name: str, source_hash: str, actor: str, replace: bool = False) -> None:
     init_usage_db(); now = datetime.now(timezone.utc).isoformat(); period = str(data["period"])
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         same = db.execute("SELECT period FROM usage_periods WHERE source_hash=?",(source_hash,)).fetchone()
         if same and same[0] != period: raise ValueError(f"This exact file was already imported as {same[0]}")
         exists = db.execute("SELECT 1 FROM usage_periods WHERE period=?",(period,)).fetchone()
         if exists and not replace: raise ValueError(f"{period} already exists; choose replace to overwrite it")
-        db.execute("INSERT OR REPLACE INTO usage_periods(period,data_json,source_name,source_hash,imported_at,imported_by) VALUES(?,?,?,?,?,?)",
+        db.execute("""INSERT INTO usage_periods(period,data_json,source_name,source_hash,imported_at,imported_by) VALUES(?,?,?,?,?,?)
+            ON CONFLICT (period) DO UPDATE SET
+                data_json=excluded.data_json,source_name=excluded.source_name,source_hash=excluded.source_hash,imported_at=excluded.imported_at,imported_by=excluded.imported_by""",
             (period,json.dumps(data,separators=(",",":")),source_name,source_hash,now,actor))
         db.commit()
 
 
 def get_usage_period(period: str) -> dict[str, Any] | None:
     init_usage_db()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         row = db.execute("SELECT data_json,source_name,source_hash,imported_at,imported_by FROM usage_periods WHERE period=?",(period,)).fetchone()
     if not row: return None
     data=json.loads(row[0]); data["import"]={"source_name":row[1],"source_hash":row[2],"imported_at":row[3],"imported_by":row[4]}; return data
@@ -252,7 +255,7 @@ def get_usage_period(period: str) -> dict[str, Any] | None:
 
 def list_usage_periods() -> list[dict[str, Any]]:
     init_usage_db()
-    with closing(sqlite3.connect(DB_PATH)) as db:
+    with closing(db_backend.connect(DB_PATH)) as db:
         rows=db.execute("SELECT period,data_json,source_name,source_hash,imported_at,imported_by FROM usage_periods ORDER BY imported_at DESC").fetchall()
     result=[]
     for period,payload,name,digest,created,actor in rows:

@@ -6,3 +6,5 @@ data/
 
 
 .venv/
+
+.postgres-test/

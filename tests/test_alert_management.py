@@ -66,7 +66,7 @@ class AlertManagementTests(unittest.TestCase):
     def test_stuck_processing_rows_are_reclaimed_after_staleness(self):
         alert=alerts.create_alert("finding:stuck","policy","high","Stuck","Minimal summary"); delivery=alerts.queue_delivery(alert["id"],"webhook")
         stale=(datetime.now(timezone.utc)-timedelta(seconds=alerts.PROCESSING_STALE_SECONDS+60)).isoformat()
-        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+        with alerts.closing(alerts.db_backend.connect(alerts.DB_PATH)) as db:
             db.execute("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",(stale,delivery["id"])); db.commit()
         with patch.object(alerts,"_deliver") as deliver:
             result=alerts.process_deliveries()
@@ -75,7 +75,7 @@ class AlertManagementTests(unittest.TestCase):
 
     def test_fresh_processing_rows_are_not_reclaimed(self):
         alert=alerts.create_alert("finding:inflight","policy","high","Inflight","Minimal summary"); delivery=alerts.queue_delivery(alert["id"],"email")
-        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+        with alerts.closing(alerts.db_backend.connect(alerts.DB_PATH)) as db:
             db.execute("UPDATE alert_deliveries SET status='processing',last_attempt_at=? WHERE id=?",(alerts._now(),delivery["id"])); db.commit()
         with patch.object(alerts,"_deliver") as deliver:
             result=alerts.process_deliveries()
@@ -94,7 +94,7 @@ class AlertManagementTests(unittest.TestCase):
         future=alerts.create_alert("future","policy","high","Review","Summary")
         for item in (expired,future):
             alerts.update_alert(item["id"],{"status":"suppressed","suppressed_until":"2099-01-01T00:00:00Z"},"analyst","Pilot")
-        with alerts.closing(alerts.sqlite3.connect(alerts.DB_PATH)) as db:
+        with alerts.closing(alerts.db_backend.connect(alerts.DB_PATH)) as db:
             db.execute("UPDATE alerts SET suppressed_until=? WHERE id=?",("2000-01-01T00:00:00-06:00",expired["id"])); db.commit()
         self.assertEqual([x["id"] for x in alerts.list_alerts(status="open")],[expired["id"]])
         self.assertEqual(alerts.expire_suppressions(),0)

@@ -1,5 +1,17 @@
 # JO AI Monitor
 
+## PostgreSQL deployment (0.11.0)
+
+PostgreSQL 17 now backs every deployed application store, with pooled connections, a dedicated persistent volume, database readiness checks, and a verified SQLite migration command. Set `POSTGRES_PASSWORD` before starting Compose. **Existing deployments must migrate their SQLite data before starting the new application.** Follow [POSTGRESQL.md](POSTGRESQL.md) for the exact cutover, backup, and validation steps. Live mode no longer accepts SQLite.
+
+## Persistent data and sign-in fixes (0.10.14 history)
+
+Before 0.11.0, SQLite stored findings, usage reports, cases, and audit history. Activity and organization views now also use durable last-successful snapshots, refreshed every five minutes by a background worker without requiring a login. The activity snapshot contains up to 5,000 recent provider events; it is not a complete historical activity archive. Saved views show their collection time or refresh failure and keep their previous data during provider outages.
+
+Provider authentication failures no longer masquerade as expired application sessions, and an initial evidence-loading failure no longer returns a signed-in user to the login screen. Session lifetime remains eight hours.
+
+The old SQLite migration source is `/data/jo-ai-monitor.db` in `claude-monitor-data`. Keep this volume for existing attachments and migration, and keep `SESSION_SECRET` stable. PostgreSQL data now lives in the separate `postgres-data` volume.
+
 A Dockerized, read-only evidence explorer for Anthropic's Claude Compliance API. It gives security, legal, and compliance teams a searchable view of Claude.ai chats, Claude Code/Cowork sessions, and activity records, with a verbatim JSON evidence export.
 
 See [LAUNCH.md](LAUNCH.md) for the 0.9.7 deployment checks and remaining environment validation.
@@ -12,6 +24,7 @@ See [SCORING.md](SCORING.md) for the current deterministic scoring formula, a wo
 
 ```bash
 cp .env.example .env
+# Set POSTGRES_PASSWORD in .env before starting.
 docker compose up --build
 ```
 
@@ -19,14 +32,14 @@ Open `http://localhost:8080`. The example credentials are `admin` / `change-me-n
 
 ## Update an existing deployment
 
-A GitHub push does not automatically rebuild an existing Docker container. From the deployment checkout, run:
+A GitHub push does not automatically rebuild an existing Docker container. For the first PostgreSQL upgrade, follow [POSTGRESQL.md](POSTGRESQL.md) instead of the routine commands below. Once migrated, from the deployment checkout run:
 
 ```bash
 git pull origin main
 docker compose up -d --build --force-recreate
 ```
 
-Then open `/health` and confirm the reported `version` is `0.9.7`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
+Then open `/health` and confirm the reported `version` is `0.11.0` and `database` is `postgresql`. The same version appears persistently in the fixed lower-left sidebar. Frontend assets are served with no-cache headers so a normal reload receives the matching interface; if a reverse proxy or CDN adds its own cache, purge it once after deployment.
 
 Version 0.9.7 adds an explicit System / Light / Dark appearance selector on both sign-in and the sidebar. System follows operating-system changes; the selected preference survives reloads.
 

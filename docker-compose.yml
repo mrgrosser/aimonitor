@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jo_ai_monitor}
+      POSTGRES_USER: ${POSTGRES_USER:-jo_ai_monitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   claude-monitor:
     image: claude-monitor:latest
     build: .
@@ -7,9 +22,21 @@ services:
       - "8080:8080"
     env_file: .env
     environment:
-      DATABASE_PATH: /data/jo-ai-monitor.db
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-jo_ai_monitor}
+      PGUSER: ${POSTGRES_USER:-jo_ai_monitor}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      DATABASE_URL: ""
+      SQLITE_MIGRATION_SOURCE: /data/jo-ai-monitor.db
+      ATTACHMENT_PATH: ${ATTACHMENT_PATH:-/data/attachments}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - claude-monitor-data:/data
     restart: unless-stopped
+
 volumes:
+  postgres-data:
   claude-monitor-data:

@@ -372,7 +372,7 @@ class FindingSyncTests(unittest.TestCase):
 class LiveModeGuardTests(unittest.TestCase):
     def _boot(self, name, extra_env):
         env = {**os.environ, "DEMO_MODE": "false", "COOKIE_SECURE":"true", "ANTHROPIC_COMPLIANCE_ACCESS_KEY": "test-key",
-               "DATABASE_PATH": str(TMP / f"guard-{name}.db"), "ATTACHMENT_PATH": str(TMP / "guard-attachments"), **extra_env}
+               "DATABASE_URL": os.getenv("TEST_POSTGRES_URL", ""), "PGHOST": "", "DATABASE_PATH": str(TMP / f"guard-{name}.db"), "ATTACHMENT_PATH": str(TMP / "guard-attachments"), **extra_env}
         return subprocess.run([sys.executable, "-c", "import app.main"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120)
 
     def test_live_mode_refuses_placeholder_secret(self):
@@ -390,9 +390,15 @@ class LiveModeGuardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("APP_PASSWORD", result.stderr)
 
+    @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL integration URL required")
     def test_live_mode_boots_with_strong_config(self):
         result = self._boot("ok", {"SESSION_SECRET": "s" * 40, "APP_PASSWORD": "a-genuinely-different-password"})
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_live_mode_requires_postgres(self):
+        result = self._boot("no-database", {"DATABASE_URL":"", "PGHOST":"", "SESSION_SECRET":"s"*40, "APP_PASSWORD":"strong-password"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Live mode requires PostgreSQL", result.stderr)
 
     def test_demo_mode_still_boots_with_defaults(self):
         env = {**os.environ, "DEMO_MODE": "true", "DATABASE_PATH": str(TMP / "guard-demo.db"), "ATTACHMENT_PATH": str(TMP / "guard-attachments")}
@@ -409,6 +415,7 @@ class LiveModeGuardTests(unittest.TestCase):
             result=self._boot(name,{"SESSION_SECRET":"s"*40,"APP_PASSWORD":"strong-password",**values})
             self.assertNotEqual(result.returncode,0); self.assertIn(message,result.stderr)
 
+    @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL integration URL required")
     def test_copilot_only_live_configuration_boots(self):
         result=self._boot("copilot",{"ANTHROPIC_COMPLIANCE_ACCESS_KEY":"", "M365_COPILOT_TENANT_ID":"tenant", "M365_COPILOT_CLIENT_ID":"client", "M365_COPILOT_CLIENT_SECRET":"secret", "SESSION_SECRET":"s"*40,"APP_PASSWORD":"strong-password"})
         self.assertEqual(result.returncode,0,result.stderr)
@@ -456,7 +463,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.10.13")
+                self.assertEqual(active.get("/health").json()["version"],"0.11.0")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
@@ -483,3 +490,38 @@ class LiveUsageIdentityTests(unittest.TestCase):
             result=main.usage_for_identity(data,None)
         self.assertNotIn('Plain Name',json.dumps(result));self.assertNotIn('Another Name',json.dumps(result))
         self.assertIn('Copilot Detail',[s['name'] for s in result['executive_sections']])
+
+
+class StoredProviderViewTests(unittest.TestCase):
+    def setUp(self):
+        _repoint_databases()
+        client.cookies.clear()
+        client.cookies.set("cm_session", main.make_token("admin", {"Compliance.Admin"}))
+
+    def test_views_do_not_fetch_on_login_or_read(self):
+        with patch.object(main, "DEMO", False), patch.object(main, "anthropic_get", AsyncMock()) as fetch:
+            main.provider_store.save("activities", {"data": [{"id": "persisted"}]})
+            main.provider_store.save("organizations", {"data": [{"id": "org"}]})
+            self.assertEqual(client.get("/api/activities").json()["data"][0]["id"], "persisted")
+            self.assertEqual(client.get("/api/organizations").json()["data"][0]["id"], "org")
+            fetch.assert_not_called()
+
+    def test_provider_unauthorized_is_not_session_unauthorized(self):
+        import httpx
+        response = httpx.Response(401, request=httpx.Request("GET", "https://example.com"))
+        gate = type("Gate", (), {"get": AsyncMock(return_value=response)})()
+        with patch.object(main, "DEMO", False), patch.object(main, "API_KEY", "test"), patch.object(main, "compliance_gate", return_value=gate):
+            with self.assertRaises(main.HTTPException) as raised:
+                asyncio.run(main.anthropic_get("/test"))
+            self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(client.get("/api/auth/me").status_code, 200)
+
+
+    def test_background_failure_preserves_data_and_other_view_refreshes(self):
+        main.provider_store.save("activities", {"data": [{"id": "previous"}]})
+        fetch = AsyncMock(side_effect=[main.HTTPException(502, "provider unavailable"), {"data": [{"id": "updated-org"}]}])
+        with patch.object(main, "anthropic_get", fetch):
+            asyncio.run(main.sync_provider_views())
+        self.assertEqual(main.provider_store.read("activities")["data"], [{"id": "previous"}])
+        self.assertEqual(main.provider_store.read("activities")["sync"]["state"], "failed")
+        self.assertEqual(main.provider_store.read("organizations")["data"], [{"id": "updated-org"}])

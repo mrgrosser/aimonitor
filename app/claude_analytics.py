@@ -1,7 +1,7 @@
 """Cached, read-only Claude Enterprise analytics collection."""
 from asyncio import sleep
 import json
-import sqlite3
+from app import database as db_backend
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -22,10 +22,16 @@ def months(now=None):
         start=(start-timedelta(days=1)).replace(day=1)
     return result
 
+@db_backend.initialize_once
+def init_analytics_db():
+    with closing(db_backend.connect(usage_reporting.DB_PATH,timeout=30)) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS claude_analytics (period TEXT PRIMARY KEY, payload TEXT NOT NULL, collected_at TEXT NOT NULL)')
+        db.commit()
+
+
 def database():
-    db=sqlite3.connect(usage_reporting.DB_PATH,timeout=30)
-    db.execute('CREATE TABLE IF NOT EXISTS claude_analytics (period TEXT PRIMARY KEY, payload TEXT NOT NULL, collected_at TEXT NOT NULL)')
-    return db
+    init_analytics_db()
+    return db_backend.connect(usage_reporting.DB_PATH,timeout=30)
 
 def saved(period=''):
     with closing(database()) as db:
@@ -155,7 +161,7 @@ async def run(key,base_url):
                     if previous and previous.get('user_report_schema') == 2 and (datetime.now(timezone.utc)-datetime.fromisoformat(previous['collected_at'])).total_seconds()<(86400 if index>1 else 3600): continue
                     data=await collect(client,start,end)
                     with closing(database()) as db:
-                        db.execute('INSERT OR REPLACE INTO claude_analytics VALUES (?,?,?)',(period,json.dumps(data),data['collected_at']));db.commit()
+                        db.execute('INSERT INTO claude_analytics VALUES (?,?,?) ON CONFLICT (period) DO UPDATE SET payload=excluded.payload,collected_at=excluded.collected_at',(period,json.dumps(data),data['collected_at']));db.commit()
             status.update(state='ready',message='Claude analytics collection succeeded')
         except httpx.HTTPStatusError as exc:
             code=exc.response.status_code

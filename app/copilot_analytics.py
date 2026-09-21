@@ -7,7 +7,7 @@ import csv
 import io
 import json
 import logging
-import sqlite3
+from app import database as db_backend
 from urllib.parse import urlparse
 import httpx
 from app import usage_reporting
@@ -17,11 +17,17 @@ status={'state':'pending','message':'Copilot usage waiting for first collection'
 WINDOWS=(7,30,90,180)
 APPS={'microsoftTeams':'Teams','word':'Word','excel':'Excel','powerPoint':'PowerPoint','outlook':'Outlook','oneNote':'OneNote','loop':'Loop','copilotChat':'Copilot Chat'}
 
+@db_backend.initialize_once
+def init_analytics_db():
+    with closing(db_backend.connect(usage_reporting.DB_PATH,timeout=30)) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS copilot_analytics (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
+        db.execute("CREATE TABLE IF NOT EXISTS copilot_snapshots (period TEXT, refresh TEXT, payload TEXT NOT NULL, PRIMARY KEY(period,refresh))")
+        db.commit()
+
+
 def database():
-    db=sqlite3.connect(usage_reporting.DB_PATH,timeout=30)
-    db.execute('CREATE TABLE IF NOT EXISTS copilot_analytics (period TEXT PRIMARY KEY,payload TEXT NOT NULL)')
-    db.execute("CREATE TABLE IF NOT EXISTS copilot_snapshots (period TEXT, refresh TEXT, payload TEXT NOT NULL, PRIMARY KEY(period,refresh))")
-    return db
+    init_analytics_db()
+    return db_backend.connect(usage_reporting.DB_PATH,timeout=30)
 
 def saved(period):
     if period.startswith("Copilot - month "):return monthly(period.removeprefix("Copilot - month "))
@@ -175,7 +181,7 @@ def failure_detail(exc):
         known=('Unexpected Microsoft report download host:', 'Empty Microsoft usage report', 'Unexpected summary rows', 'Unexpected reporting window', 'Inconsistent Microsoft report refresh', 'Missing Microsoft adoption totals', 'Negative adoption count')
         return message[:250] if message.startswith(known) else 'Invalid report value or CSV encoding (ValueError)'
     if isinstance(exc,httpx.RequestError):return 'Microsoft download/network failure: '+type(exc).__name__
-    if isinstance(exc,sqlite3.Error):return 'Local analytics database failure: '+type(exc).__name__
+    if isinstance(exc,db_backend.Error):return 'Local analytics database failure: '+type(exc).__name__
     return 'Collector failure: '+type(exc).__name__
 
 async def run(token_provider):
@@ -187,12 +193,12 @@ async def run(token_provider):
                     old=saved(f'Copilot - last {days} days')
                     if old:
                         with closing(database()) as db:
-                            db.execute('INSERT OR IGNORE INTO copilot_snapshots VALUES (?,?,?)',(old['period'],old['report_refresh_date'],json.dumps(old)));db.commit()
+                            db.execute('INSERT INTO copilot_snapshots VALUES (?,?,?) ON CONFLICT DO NOTHING',(old['period'],old['report_refresh_date'],json.dumps(old)));db.commit()
                     if old and old.get('user_report_schema') == 1 and (datetime.now(timezone.utc)-datetime.fromisoformat(old['collected_at'])).total_seconds()<21600:continue
                     data=await collect(client,await token_provider(),days)
                     with closing(database()) as db:
-                        db.execute('INSERT OR REPLACE INTO copilot_snapshots VALUES (?,?,?)',(data['period'],data['report_refresh_date'],json.dumps(data)))
-                        db.execute('INSERT OR REPLACE INTO copilot_analytics VALUES (?,?)',(data['period'],json.dumps(data)));db.commit()
+                        db.execute('INSERT INTO copilot_snapshots VALUES (?,?,?) ON CONFLICT (period,refresh) DO UPDATE SET payload=excluded.payload',(data['period'],data['report_refresh_date'],json.dumps(data)))
+                        db.execute('INSERT INTO copilot_analytics VALUES (?,?) ON CONFLICT (period) DO UPDATE SET payload=excluded.payload',(data['period'],json.dumps(data)));db.commit()
             status.update(state='ready',message='Copilot usage collection succeeded')
         except httpx.HTTPStatusError as exc:
             code=exc.response.status_code
