@@ -477,7 +477,9 @@ class LiveUsageIdentityTests(unittest.TestCase):
         for method,expected in [('entra','User-123'),('local','Non Email Name')]:
             with patch.object(main,'current_identity',return_value={'method':method,'roles':set()}):
                 result=main.usage_for_identity(data,None)
-            self.assertEqual(result['executive_sections'][0]['rows'][1][0],expected)
+            self.assertEqual(result['executive_sections'][0]['name'],'Leadership Summary')
+            user_section=next(s for s in result['executive_sections'] if s['name']=='Usage by user')
+            self.assertEqual(user_section['rows'][1][0],expected)
             if method=='entra':self.assertNotIn('Non Email Name',json.dumps(result))
 
     def test_detailed_sources_and_license_roster_do_not_leak_names(self):

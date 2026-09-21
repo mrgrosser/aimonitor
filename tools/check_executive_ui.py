@@ -10,8 +10,8 @@ def route_app(route):
     if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"test"})
     elif path=="/api/auth/me": route.fulfill(json={"pages":["reports"],"usage_import":False})
     elif path in ("/api/reports/executive/periods","/api/usage/periods"):route.fulfill(json={"current_month":"2026-09","data":[{"period":"2026-09"},{"period":"2026-08"},{"period":"Copilot - last 30 days"},{"period":"Copilot - month 2026-08"}]})
-    elif path in ("/api/usage","/api/reports/executive") and "month" in route.request.url:route.fulfill(json={"summary":{"copilot_average_daily_users":1.5,"copilot_peak_daily_users":3,"copilot_reported_days":2,"copilot_calendar_days":31},"executive_sections":[],"caveats":["2 of 31 days available"]})
-    elif path in ("/api/usage","/api/reports/executive") and "Copilot" in route.request.url:route.fulfill(json={"summary":{"copilot_active_users":8,"copilot_enabled_users":12},"report_refresh_date":"2026-09-06","charts_html":"","executive_sections":[]})
+    elif path in ("/api/usage","/api/reports/executive") and "month" in route.request.url:route.fulfill(json={"summary":{"copilot_average_daily_users":1.5,"copilot_peak_daily_users":3,"copilot_reported_days":2,"copilot_calendar_days":31},"executive_sections":[{"name":"Copilot Daily Trend","rows":[["Date","Active accounts"],["2026-08-01",3]]}],"caveats":["2 of 31 days available"]})
+    elif path in ("/api/usage","/api/reports/executive") and "Copilot" in route.request.url:route.fulfill(json={"summary":{"copilot_active_users":8,"copilot_enabled_users":12},"report_refresh_date":"2026-09-06","charts_html":"","executive_sections":[{"name":"Copilot adoption summary","rows":[["Measure","Value"],["Active users",8]]}]})
     elif path in ("/api/reports/executive","/api/usage"):route.fulfill(json={"period":"August 2026","mode":"imported","source":"Monthly workbook","summary":{"copilot_active_users":10,"copilot_interactions":100,"claude_requests":20,"claude_usage_spend":3.5},"executive_sections":[{"name":"Department Summary","rows":[["Department","Users"],["<script>bad()</script>",2]]},{"name":"Daily trend","rows":[[str(i),i] for i in range(65)]}],"user_detail_included":False,"charts_html":CHARTS})
     elif path.startswith("/api/"):route.fulfill(json={"data":[]})
     else:
@@ -33,7 +33,7 @@ with sync_playwright() as p:
     page.locator('#executiveSearch').fill('')
 
     assert "pseudonymized" not in page.locator("#executiveReport").inner_text()
-    assert "format=xlsx" in page.get_by_text("Download Excel",exact=True).get_attribute("href")
+    assert "format=xlsx" in page.locator('[data-report-format="xlsx"]').get_attribute("href")
     page.locator("#executiveSection").select_option("1")
     page.locator("#executiveNext").click()
     assert page.locator("#executivePage").inner_text()=="31–60 of 65 rows"
@@ -42,27 +42,24 @@ with sync_playwright() as p:
     assert page.locator(".report-chart").count()==3
     assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
     assert page.locator("#executivePeriod option").all_text_contents()==["August 2026","Copilot — August 2026"]
-    assert page.locator("#executiveReport h3").first.inner_text()=="Claude"
+    assert page.locator("#executiveReport h3").first.inner_text()=="Usage reports"
     assert page.locator("#executiveReport").get_attribute("data-provider")=="claude"
-    assert 'Average daily active users' in page.locator('#copilotOverview').inner_text()
-    assert 'Unavailable' not in page.locator('#copilotOverview').inner_text()
-    page.locator("#viewCopilotDetail").click()
-    page.wait_for_function("document.querySelector('#executiveReport')?.dataset.provider==='copilot'")
-    assert "Copilot%20-%20month%202026-08" in page.get_by_text("Download Excel",exact=True).get_attribute("href")
-    assert page.locator("#copilotOverview").is_hidden()
-    assert 'Average daily active users' in page.locator('#executiveReport').inner_text()
-    assert '1.5' in page.locator('#executiveReport').inner_text()
+    assert 'Average daily active users' in page.locator('.provider-overview').nth(1).inner_text()
+    assert 'Unavailable' not in page.locator('.provider-overview').nth(1).inner_text()
+    assert page.locator('#viewCopilotDetail').count()==0
+    page.locator('#executiveSection').select_option('2')
+    assert "Copilot%20-%20month%202026-08" in page.locator('[data-report-format="xlsx"]').get_attribute("href")
+    assert '2026-08-01' in page.locator('#executiveTable').inner_text()
+    assert page.locator('.provider-overview').nth(1).bounding_box()['y'] < page.locator('#executiveSection').bounding_box()['y']
     page.evaluate("openExecutiveReports(true)")
     page.wait_for_function("document.querySelector('#executivePeriod')?.value==='2026-09'")
+    page.locator('#executiveSection').wait_for()
     assert page.locator("#executivePeriod option").all_text_contents()==["September 2026","Copilot - last 30 days"]
-    page.locator("#viewCopilotDetail").wait_for()
-    assert page.locator("#executiveReport h3").first.inner_text()=="Claude"
-    assert page.locator("#executiveReport").evaluate("e=>getComputedStyle(e).getPropertyValue('--report-accent').trim()") == "#b65335"
-    assert "Active users" in page.locator("#copilotOverview").inner_text()
-    assert "8" in page.locator("#copilotOverview").inner_text()
-    page.locator("#viewCopilotDetail").click()
-    page.wait_for_function("document.querySelector('#executiveReport')?.dataset.provider==='copilot'")
-    assert page.locator("#copilotOverview").is_hidden()
+    assert page.locator("#executiveReport h3").first.inner_text()=="Usage reports"
+    assert "Active users" in page.locator('.provider-overview').nth(1).inner_text()
+    assert "8" in page.locator('.provider-overview').nth(1).inner_text()
+    page.locator('#executiveSection').select_option('2')
+    assert 'Copilot%20-%20last%2030%20days' in page.locator('[data-report-format="xlsx"]').get_attribute('href')
     page.evaluate("document.documentElement.setAttribute('data-theme','dark')")
     assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
     assert not errors,errors

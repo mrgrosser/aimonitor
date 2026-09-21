@@ -310,6 +310,26 @@ def report_value(value,money=False):
     return str(value)
 
 
+def directory_quality_rows(data):
+    quality=data.get('directory_quality',{})
+    rows=[['Measure','Value'],['Reporting basis',data.get('report_basis','Not supplied')],
+          ['Directory snapshot',data.get('directory_as_of') or 'Unavailable']]
+    if quality:
+        rows.extend([
+            ['Active accounts in user detail',report_value(quality['active_accounts'])],
+            ['Active accounts with a department',report_value(quality['department_mapped_active_accounts'])],
+            ['Active accounts without a directory match',report_value(quality['unmapped_active_accounts'])],
+            ['Active matched accounts missing a department',report_value(quality['matched_active_accounts']-quality['department_mapped_active_accounts'])]])
+    users=data.get('top_users',[])
+    summary=data.get('summary',{})
+    unit='interactions' if 'copilot_interactions' in summary else 'requests' if 'claude_requests' in summary else None
+    if users and unit and all(u.get('volume') is not None for u in users):
+        rows.append(['Account-attributed '+unit,report_value(sum(u['volume'] for u in users))])
+    if users and 'claude_usage_spend' in summary and all(u.get('spend') is not None for u in users):
+        rows.append(['Account-attributed spend (USD)',report_value(sum(u['spend'] for u in users),money=True)])
+    return rows
+
+
 def summary_tables(data):
     tables=[]
     for title,key,columns in [
@@ -318,18 +338,14 @@ def summary_tables(data):
         ('Claude products','claude_products',[('Product','name'),('Requests','requests'),('Spend (USD)','spend')]),
         ('Claude models','claude_models',[('Model','name'),('Requests','requests'),('Spend (USD)','spend')])]:
         if data.get(key):tables.append((title,[[c[0] for c in columns]]+[[report_value(r.get(k),money=k=='spend') for _,k in columns] for r in data[key]]))
-    if data.get('department_adoption') is not None:
-        unit='Interactions' if 'copilot_interactions' in data.get('summary',{}) else 'Requests'
+    if data.get('department_usage') is not None:
+        unit='Interactions' if 'copilot_interactions' in data.get('summary',{}) else 'Requests' if 'claude_requests' in data.get('summary',{}) else 'Volume (not supplied)'
         spend='claude_requests' in data.get('summary',{})
-        rows=[['Department','Headcount','Active users','Adoption',unit]+(['Spend (USD)'] if spend else [])]
-        for r in data['department_adoption']:
-            rows.append([r['Department'],report_value(r['Headcount']),report_value(r['Users']),f"{r['Adoption']:.1%}" if r['Adoption'] is not None else 'Not supplied',report_value(r['Volume'])]+([report_value(r['Spend (USD)'],money=True)] if spend else []))
-        tables.insert(0,('Department summary',rows))
-    for provider in ('Microsoft 365 Copilot','Claude Enterprise'):
-        users=sorted([r for r in data.get('top_users',[]) if r.get('provider')==provider],key=lambda r:r.get('volume') or 0,reverse=True)[:10]
-        if users:
-            unit='Interactions' if provider=='Microsoft 365 Copilot' else 'Requests'
-            tables.append((provider+' - top 10 by recorded volume',[['User','Department',unit]]+[[r['user'],r.get('department','Not supplied'),report_value(r.get('volume'))] for r in users]))
+        rows=[['Department','Active accounts',unit]+(['Spend (USD)'] if spend else [])]
+        for r in data['department_usage']:
+            rows.append([r['Department'],report_value(r['Users']),report_value(r['Volume'])]+([report_value(r['Spend (USD)'],money=True)] if spend else []))
+        if len(rows)>1:tables.insert(0,('Department usage',rows))
+    if data.get('report_basis'):tables.insert(0,('Reporting basis',directory_quality_rows(data)))
     return tables
 
 

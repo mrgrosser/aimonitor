@@ -64,3 +64,9 @@
 #refresh[aria-busy="true"] .refresh-icon{animation:refresh-spin 1s linear infinite}
 @keyframes refresh-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#refresh[aria-busy="true"] .refresh-icon{animation:none}}
+
+/* Shared provider graphs and report controls. */
+.provider-overview + .provider-overview { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border, #334155); }
+.usage-panel > .usage-tools { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 1.5rem 0; }
+.usage-panel > .usage-tools label { display: flex; flex-direction: column; gap: .4rem; }
+.usage-panel > .usage-tools .usage-actions { display: flex; flex-wrap: wrap; gap: .75rem; }

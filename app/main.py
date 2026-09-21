@@ -1126,7 +1126,7 @@ def usage_for_identity(data: dict[str, Any], request: Request) -> dict[str, Any]
                 row.get('tokens') if row.get('tokens') is not None else 'Not supplied',
                 row.get('last_activity') or 'Not supplied',', '.join(row.get('products',[]))])
         result['executive_sections']=[{'name':'Usage by user','rows':rows},*result.get('executive_sections',[])]
-    if data.get('user_report_schema',0)>=2:
+    if data.get('user_report_schema'):
         result['executive_sections']=workbook_reporting.sections(result)
     return result
 

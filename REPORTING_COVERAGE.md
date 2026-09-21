@@ -14,7 +14,9 @@ Reference: AI_Usage_Copilot_and_Claude_August2026.xlsx, 11 sheets. The reference
 | Workbook sheet | Implemented reporting path | Source limits |
 |---|---|---|
 | AI Usage Summary | Provider summaries, active users, separate request/interaction counts, spend, app/product mix | Provider reports keep populations and periods separate. Claude's workbook-specific agent-assisted definition is not inferred from request volume. |
-| Department Summary | Dated directory headcount, mapped/unmapped users, adoption, provider volume and spend | Directory connector required. Ratios use the labeled snapshot; no denominator for unmatched accounts. |
+| Department Summary | Active accounts, account-attributed provider volume and spend; only departments with activity or spend | No employee headcount or adoption denominator without a verified employee roster. Missing departments and unmatched accounts retain their recorded usage. |
+| Leadership Summary | Provider metrics, reporting basis, department attribution coverage and account-attributed totals | Organization totals may include activity outside account detail. Provider units remain separate. |
+| Directory Coverage / Directory Quality | All department account counts, missing departments and guest-style UPN counts | Enabled accounts are not employees. Guest-style UPNs are a subset, not an additional population. No automatic exclusions by account name. |
 | Copilot User by App | Full user/app interaction matrix, apps used, active days, agent interactions | Requires Purview. Includes unlicensed activity returned by that source. |
 | Claude User by Product | Full user/product request matrix, products and models used, exact user spend | Requires successful detailed Analytics API collection. |
 | Copilot App Totals | Interactions, distinct users, average per user, share, original app-host grouping | Uses deduplicated audit records, not rolling Graph adoption totals. |
@@ -67,6 +69,15 @@ Use the existing Microsoft application credentials, with application `AuditLogsQ
 
 ## 0.10.13 summary exports and departments
 
-PDF and Print report now contain provider-specific metrics, charts, department summary when available, product/application summaries, and at most ten users per provider. Individual interaction records and full user lists remain in Download Excel, CSV/JSON, and on-screen sections; they are excluded from summary printouts.
+PDF and Print report now contain provider-specific metrics, charts, department summary when available, product/application summaries, and reporting-basis coverage. Individual user rankings are excluded. Individual interaction records and full user lists remain in Download Excel, CSV/JSON, and on-screen sections; they are excluded from summary printouts.
 
 To enable department summaries, grant Microsoft Graph application `User.Read.All` with admin consent and set `USAGE_DIRECTORY_ENABLED=true` in the deployed environment, then restart. The existing Microsoft credentials are reused. Enabled Entra accounts are matched to Claude and Copilot usage by email or userPrincipalName. The report labels the directory observation date; applying today's directory to an older month does not establish historical department membership. Unmatched users remain unmapped.
+
+
+## Leadership reporting and directory quality
+
+Live reports no longer treat enabled Entra accounts as employee headcount. Employee adoption is unavailable until a trusted employee roster is integrated; no configuration option currently certifies a roster. Department grouping normalizes capitalization and whitespace, but does not infer organizational aliases such as IS/IT. Existing snapshots benefit at report time.
+
+PDF and print summaries show departments with recorded activity or spend, retaining missing-department and unmatched usage. Full directory counts remain in the on-screen and Excel Directory Coverage/Directory Quality sections. User lists remain subject to the existing identity permissions. No directory objects are changed or deleted. No identities are excluded using naming heuristics.
+
+The shared report dropdown defaults to Leadership Summary when user detail is available. Claude and Copilot sections remain provider-specific; export links follow the selected section. Deploy the application changes and reload the reports; no database migration or new directory snapshot is required.

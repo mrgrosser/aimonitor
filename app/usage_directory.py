@@ -49,31 +49,58 @@ def enrich(data):
     if not data.get('user_report_schema'):return data
     result=copy.deepcopy(data)
     current=snapshot(data.get('range_end') or data.get('collected_at') or '')
-    if not current:
-        result.setdefault('caveats',[]).append('Department adoption needs a dated directory snapshot. '+status['message'])
-        return result
-    stamp,people=current;lookup={};departments={}
+    stamp,people=current if current else (None,[])
+    lookup={};departments={}
+    # Normalize at report time so existing snapshots benefit without rewriting history.
+    labels={}
     for person in people:
-        dep=person['department'];departments.setdefault(dep,{'Department':dep,'Headcount':0,'Users':0,'Volume':0,'Spend (USD)':0})['Headcount']+=1
+        label=' '.join(str(person.get('department') or '').split()) or '(no department)'
+        labels.setdefault(label.casefold(),label)
+    people=[dict(person,department=labels[(' '.join(str(person.get('department') or '').split()) or '(no department)').casefold()]) for person in people]
+    for person in people:
+        dep=person['department'];departments.setdefault(dep,{'Department':dep,'Directory accounts':0,'Users':0,'Volume':0,'Spend (USD)':0})['Directory accounts']+=1
         for key in {person['upn'],person['mail']} - {''}:
             # Ambiguous mail aliases must not silently assign a department.
             lookup[key]=person if key not in lookup else None
-    active_ids={}
+    active_ids={};matched_ids=set();mapped_ids=set();all_active=set()
     for user in result.get('top_users',[]):
         person=lookup.get(user['user'].lower());dep=person['department'] if person else '(unmapped)'
         user['department']=dep
-        row=departments.setdefault(dep,{'Department':dep,'Headcount':None,'Users':0,'Volume':0,'Spend (USD)':0})
+        row=departments.setdefault(dep,{'Department':dep,'Directory accounts':0,'Users':0,'Volume':0,'Spend (USD)':0})
         active=(user.get('volume') or 0)>0 or user.get('activity_status')=='Active in period'
-        if active:active_ids.setdefault(dep,set()).add(person['id'] if person else user['user'].lower())
+        if active:
+            uid=person['id'] if person else user['user'].lower()
+            active_ids.setdefault(dep,set()).add(uid);all_active.add(uid)
+            if person:matched_ids.add(uid)
+            if person and dep!='(no department)':mapped_ids.add(uid)
         row['Users']=len(active_ids.get(dep,set()))
         if user.get('volume') is None:row['Volume']=None
         elif row['Volume'] is not None:row['Volume']+=user['volume']
         if user.get('spend') is None:row['Spend (USD)']=None
         elif row['Spend (USD)'] is not None:row['Spend (USD)']+=user['spend']
-    for row in departments.values():row['Adoption']=row['Users']/row['Headcount'] if row['Headcount'] else None
-    result['department_adoption']=sorted(departments.values(),key=lambda r:r['Department'])
+    # Directory accounts are not a verified employee population.
+    for row in departments.values():
+        row['Headcount']=None;row['Adoption']=None
+    result['department_adoption']=sorted(departments.values(),key=lambda r:r['Department'].casefold())
+    result['department_usage']=sorted(
+        [r for r in departments.values() if r['Users'] or r['Volume'] or r['Spend (USD)']],
+        key=lambda r:(-(r['Volume'] or 0),-r['Users'],r['Department'].casefold()))
     result['directory_as_of']=stamp
-    result.setdefault('caveats',[]).append('Department mapping and enabled-account headcount were observed '+stamp+'. This is a directory snapshot, not historical staffing proof. Unmatched accounts have no adoption denominator.')
+    result['directory_quality']={
+        'enabled_accounts':len(people),
+        'missing_department':sum(p['department']=='(no department)' for p in people),
+        'guest_style_accounts':sum('#ext#' in p['upn'].lower() for p in people),
+        'active_accounts':len(all_active),'matched_active_accounts':len(matched_ids),
+        'department_mapped_active_accounts':len(mapped_ids),
+        'unmapped_active_accounts':len(all_active-matched_ids),
+        'employee_population_verified':False}
+    result['report_basis']='Recorded account activity; employee adoption is not available because an employee roster has not been verified.'
+    result.setdefault('caveats',[]).append(result['report_basis'])
+    result['caveats'].append('Department totals cover available account-attributed records; organization totals may also include activity outside user detail. Department totals retain all usage from those records, including accounts with missing departments or no directory match. Only departments with activity or spend appear in the leadership summary; the full directory counts are in Directory Coverage. Accounts are not excluded based on their names.')
+    if stamp:
+        result['caveats'].append('Department mapping was observed '+stamp+'. Names are grouped ignoring capitalization and whitespace; abbreviations remain separate. This snapshot includes guest, service and test accounts and is not historical employee headcount.')
+    else:
+        result['caveats'].append('No directory snapshot is available. Department attribution is unavailable. '+status['message'])
     return result
 
 

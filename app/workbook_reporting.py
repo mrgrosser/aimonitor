@@ -39,13 +39,28 @@ def sections(data):
     if data.get('licensed_users') is not None:
         result.append(section('Copilot licensed users',['User','License report as of','Report membership','Last reported activity'],[
             [r['user'],data.get('license_report_as_of'),r.get('license_status','Included in licensed-user report'),r.get('last_activity')] for r in data['licensed_users']]))
-    if data.get('department_adoption') is not None:
+    if data.get('department_usage') is not None:
         unit='Interactions' if 'copilot_interactions' in data.get('summary',{}) else 'Requests' if 'claude_requests' in data.get('summary',{}) else 'Volume (not supplied)'
-        result.append(section('Department Summary',['Department','Headcount','Active users','Adoption',unit,'Spend (USD)'],[
-            [r['Department'],r['Headcount'],r['Users'],r['Adoption'],r['Volume'],r['Spend (USD)']] for r in data['department_adoption']],['General','#,##0','#,##0','0.0%','#,##0','$#,##0.00']))
+        spend='claude_requests' in data.get('summary',{})
+        result.append(section('Department Summary',['Department','Active accounts',unit]+(['Spend (USD)'] if spend else []),[
+            [r['Department'],r['Users'],r['Volume']]+([r['Spend (USD)']] if spend else []) for r in data['department_usage']],
+            ['General','#,##0','#,##0']+(['$#,##0.00'] if spend else [])))
+        q=data['directory_quality']
+        result.append(section('Directory Quality',['Measure','Value'],[
+            ['Directory snapshot',data.get('directory_as_of') or 'Unavailable'],
+            ['Enabled directory accounts',q['enabled_accounts'] if data.get('directory_as_of') else None],
+            ['Accounts missing a department',q['missing_department'] if data.get('directory_as_of') else None],
+            ['Guest-style UPNs (subset of enabled accounts)',q['guest_style_accounts'] if data.get('directory_as_of') else None],
+            ['Employee population','Not verified'],
+            ['Account classification','Guest-style UPNs are identified by #EXT#. Other accounts are unclassified; names alone do not establish employee or service-account status.']]))
+        result.append(section('Directory Coverage',['Department','Enabled directory accounts','Active accounts'],[
+            [r['Department'],r['Directory accounts'],r['Users']] for r in data['department_adoption']]))
     names={s['name'] for s in result}
     result=[s for s in data.get('executive_sections',[]) if s['name'] not in names]+result
     if not any(s['name']=='AI Usage Summary' for s in result):
         result.insert(0,section('AI Usage Summary',['Measure','Value'],[[k,v] for k,v in data.get('summary',{}).items()]))
     result.append(section('Notes & Caveats',['Notes'],[[c] for c in data.get('caveats',[])]))
+    if data.get('report_basis'):
+        from app.usage_reporting import summary_metrics, directory_quality_rows
+        result.insert(0,section('Leadership Summary',['Measure','Value'],summary_metrics(data)[1:]+directory_quality_rows(data)[1:]))
     return result

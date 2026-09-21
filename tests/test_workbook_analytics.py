@@ -64,9 +64,99 @@ class WorkbookAnalyticsTests(unittest.TestCase):
             self.assertEqual(result['directory_as_of'],'2026-09-02T00:00:00+00:00')
             self.assertEqual(result['top_users'][0]['department'],'IT')
             rows={r['Department']:r for r in result['department_adoption']}
-            self.assertEqual(rows['IT']['Adoption'],1)
+            self.assertIsNone(rows['IT']['Adoption'])
+            self.assertEqual([r['Department'] for r in result['department_usage']],['IT'])
             self.assertEqual(rows['HR']['Users'],0)
             self.assertNotIn('Disabled',rows)
+
+class DepartmentNormalizationTests(unittest.TestCase):
+    def test_existing_snapshot_variants_merge_without_merging_abbreviations(self):
+        people=[{'id':str(i),'upn':f'{i}@example.test','mail':'','department':dep}
+                for i,dep in enumerate(['PreMedia',' premedia ', 'Human  Resources','human resources','IT','Information Technology','   '])]
+        data={'user_report_schema':True,'top_users':[
+            {'user':'0@example.test','volume':2,'spend':1},
+            {'user':'1@example.test','volume':3,'spend':2},
+            {'user':'unknown@example.test','volume':4,'spend':0}]}
+        with patch.object(d,'snapshot',return_value=('2026-09-01',people)):
+            result=d.enrich(data)
+        rows={r['Department']:r for r in result['department_adoption']}
+        self.assertEqual(rows['PreMedia']['Directory accounts'],2)
+        self.assertEqual(rows['PreMedia']['Users'],2)
+        self.assertEqual(rows['PreMedia']['Volume'],5)
+        self.assertEqual(rows['PreMedia']['Spend (USD)'],3)
+        self.assertIsNone(rows['PreMedia']['Adoption'])
+        self.assertEqual(rows['Human Resources']['Directory accounts'],2)
+        self.assertEqual(rows['(no department)']['Directory accounts'],1)
+        self.assertIsNone(rows['(unmapped)']['Adoption'])
+        self.assertIn('IT',rows)
+        self.assertIn('Information Technology',rows)
+        self.assertEqual(result['top_users'][1]['department'],'PreMedia')
+        self.assertEqual(people[1]['department'],' premedia ')
+
+class LeadershipReportingTests(unittest.TestCase):
+    def report(self,people):
+        data={'user_report_schema':2,'summary':{'claude_requests':10,'claude_usage_spend':6},'top_users':[
+            {'user':'person@example.test','provider':'Claude Enterprise','volume':4,'spend':2},
+            {'user':'guest#ext#@example.test','provider':'Claude Enterprise','volume':3,'spend':1},
+            {'user':'unmatched@example.test','provider':'Claude Enterprise','volume':3,'spend':3}],
+            'caveats':[]}
+        with patch.object(d,'snapshot',return_value=('2026-09-01',people) if people is not None else None):
+            return d.enrich(data)
+
+    def test_leadership_totals_preserve_guest_and_unmatched_usage(self):
+        people=[{'id':'1','upn':'person@example.test','mail':'','department':'IT'},
+                {'id':'2','upn':'guest#ext#@example.test','mail':'','department':''},
+                {'id':'3','upn':'test@example.test','mail':'','department':'Unused'}]
+        result=self.report(people)
+        self.assertEqual(sum(r['Volume'] for r in result['department_usage']),10)
+        self.assertEqual(sum(r['Spend (USD)'] for r in result['department_usage']),6)
+        self.assertNotIn('Unused',[r['Department'] for r in result['department_usage']])
+        self.assertTrue(all(r['Headcount'] is None and r['Adoption'] is None for r in result['department_adoption']))
+        q=result['directory_quality']
+        self.assertEqual((q['active_accounts'],q['department_mapped_active_accounts'],q['unmapped_active_accounts']),(3,1,1))
+        self.assertEqual((q['enabled_accounts'],q['missing_department'],q['guest_style_accounts']),(3,1,1))
+        result['executive_sections']=w.sections(result)
+        self.assertEqual(result['executive_sections'][0]['name'],'Leadership Summary')
+        book=load_workbook(io.BytesIO(executive_xlsx(result)))
+        self.assertEqual(list(book['Department Summary'].values)[0],('Department','Active accounts','Requests','Spend (USD)'))
+        self.assertTrue(any(row[0]=='Unused' for row in book['Directory Coverage'].values))
+        book.close()
+        rendered=usage_html(result,'tester','test')
+        self.assertIn('employee roster has not been verified',rendered)
+        self.assertNotIn('person@example.test',rendered)
+        self.assertNotIn('top 10',rendered)
+        self.assertNotIn('Unused',rendered)
+        self.assertIn('(unmapped)',rendered)
+        from app.usage_reporting import usage_pdf
+        self.assertTrue(usage_pdf(result,'tester','test').startswith(b'%PDF'))
+
+    def test_missing_snapshot_retains_all_usage_as_unmapped(self):
+        result=self.report(None)
+        self.assertEqual(result['department_usage'][0]['Volume'],10)
+        self.assertEqual(result['department_usage'][0]['Department'],'(unmapped)')
+        self.assertEqual(result['directory_quality']['unmapped_active_accounts'],3)
+        self.assertIsNone(result['directory_as_of'])
+
+    def test_rolling_activity_keeps_unknown_volume_and_omits_inactive_roster(self):
+        people=[{'id':'1','upn':'active@example.test','mail':'','department':'Sales'},
+                {'id':'2','upn':'inactive@example.test','mail':'','department':'Unused'}]
+        data={'user_report_schema':1,'summary':{'copilot_active_users':1},'top_users':[
+            {'user':'active@example.test','activity_status':'Active in period','volume':None,'spend':None},
+            {'user':'inactive@example.test','activity_status':'No activity','volume':None,'spend':None}]}
+        with patch.object(d,'snapshot',return_value=('2026-09-01',people)):
+            result=d.enrich(data)
+        self.assertEqual(len(result['department_usage']),1)
+        self.assertEqual(result['department_usage'][0]['Department'],'Sales')
+        self.assertIsNone(result['department_usage'][0]['Volume'])
+        self.assertEqual(result['directory_quality']['active_accounts'],1)
+        sections=w.sections(result)
+        self.assertNotIn('Spend (USD)',next(s for s in sections if s['name']=='Department Summary')['rows'][0])
+
+    def test_ambiguous_alias_is_not_assigned_a_department(self):
+        result=self.report([{'id':'1','upn':'a@example.test','mail':'person@example.test','department':'Sales'},
+                            {'id':'2','upn':'b@example.test','mail':'person@example.test','department':'IT'}])
+        self.assertEqual(result['top_users'][0]['department'],'(unmapped)')
+        self.assertEqual(result['directory_quality']['department_mapped_active_accounts'],0)
 
 class PurviewCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_query_resume_paginate_and_publish(self):
@@ -122,11 +212,12 @@ class SummaryReportTests(unittest.TestCase):
         from app.usage_reporting import summary_tables
         data={'summary':{'copilot_interactions':5000,'copilot_active_users':1},
             'executive_sections':[{'name':'Copilot Detail','rows':[['User'],*[[f'raw-{i}'] for i in range(5000)]]}],
-            'department_adoption':[{'Department':'Sales','Headcount':10,'Users':1,'Adoption':.1,'Volume':5000,'Spend (USD)':None}]}
+            'department_usage':[{'Department':'Sales','Users':1,'Volume':5000,'Spend (USD)':None}]}
         rendered=usage_html(data,'tester','test')
         self.assertNotIn('raw-4999',rendered)
         self.assertNotIn('Claude',rendered)
-        self.assertIn('Department summary',rendered)
-        self.assertIn('10.0%',rendered)
+        self.assertIn('Department usage',rendered)
+        self.assertNotIn('Headcount',rendered)
+        self.assertNotIn('10.0%',rendered)
         self.assertLess(len(rendered),10000)
         self.assertNotIn('Spend (USD)',str(summary_tables(data)))

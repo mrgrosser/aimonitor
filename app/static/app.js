@@ -115,14 +115,13 @@ async function openExecutiveReports(usagePage=false){
   const monthly=all.filter(p=>!p.period.startsWith('Copilot - ')&&(usagePage?p.period===current:(!/^\d{4}-\d{2}$/.test(p.period)||p.period<current)));
   const rolling=all.filter(p=>usagePage?(p.period.startsWith('Copilot - last ')||p.period==='Copilot - month '+current):(p.period.startsWith('Copilot - month ')&&p.period.slice(-7)<current));
   const periods=[...monthly,...rolling];
-  $('#infoBody').innerHTML=`<div class="usage-tools"><label>Reporting period<select id="executivePeriod">${monthly.length?`<optgroup label="${usagePage?'Current month':'Completed months'}">${monthly.map(p=>`<option value="${esc(p.period)}">${esc(reportPeriodLabel(p.period))}</option>`).join('')}</optgroup>`:''}${rolling.length?`<optgroup label="Copilot reporting periods">${rolling.map(p=>`<option value="${esc(p.period)}">${esc(reportPeriodLabel(p.period))}</option>`).join('')}</optgroup>`:''}</select></label><div class="usage-actions"><button id="complianceReports">Compliance reports</button><button id="refreshAnalytics">Refresh view</button></div></div><p>${esc(response.analytics_status?.message||'')}</p><div id="copilotOverview"></div><div id="executiveReport"></div>`;
+  $('#infoBody').innerHTML=`<div class="usage-tools"><label>Reporting period<select id="executivePeriod">${monthly.length?`<optgroup label="${usagePage?'Current month':'Completed months'}">${monthly.map(p=>`<option value="${esc(p.period)}">${esc(reportPeriodLabel(p.period))}</option>`).join('')}</optgroup>`:''}${rolling.length?`<optgroup label="Copilot reporting periods">${rolling.map(p=>`<option value="${esc(p.period)}">${esc(reportPeriodLabel(p.period))}</option>`).join('')}</optgroup>`:''}</select></label><div class="usage-actions"><button id="complianceReports">Compliance reports</button><button id="refreshAnalytics">Refresh view</button></div></div><p>${esc(response.analytics_status?.message||'')}</p><div id="executiveReport"></div>`;
   $('#complianceReports').onclick=()=>openReports();
   $('#complianceReports').classList.toggle('hidden',!(identity.pages||[]).includes('reports'));
   $('#refreshAnalytics').onclick=()=>openExecutiveReports(usagePage);
   $('#executiveReport').dataset.usagePage=usagePage?'1':'';
   if(!periods.length){$('#executiveReport').innerHTML=`<div class="modal-message">${usagePage?'The current month has not been collected yet.':'No completed monthly reports are available yet.'} ${esc(response.analytics_status?.message||'')} Refresh the view after collection completes.</div>`;return}
   $('#executivePeriod').onchange=loadExecutiveReport;await loadExecutiveReport();
-  if(usagePage&&rolling.length)await showCopilotOverview(rolling.find(p=>p.period==='Copilot - month '+current)?.period||rolling.find(p=>p.period==='Copilot - last 30 days')?.period||rolling[0].period);
  }catch(e){viewError(e)}
 }
 async function loadExecutiveReport(){
@@ -131,17 +130,41 @@ async function loadExecutiveReport(){
   const period=$('#executivePeriod').value;
   const data=await api((host.dataset.usagePage?'/api/usage?period=':'/api/reports/executive?period=')+encodeURIComponent(period));
   if($('#executivePeriod').value!==period)return;
-  const s=data.summary||{},sections=data.executive_sections||[];
+  const available=[...$('#executivePeriod').options].map(o=>o.value);
+  const month=period.startsWith('Copilot - month ')?period.slice(-7):period;
+  const companion=period.startsWith('Copilot - ')?(available.includes(month)?month:null):
+    (available.includes('Copilot - month '+month)?'Copilot - month '+month:
+      host.dataset.usagePage?(available.find(p=>p==='Copilot - last 30 days')||available.find(p=>p.startsWith('Copilot - last '))):null);
+  const reports=[{period,data}];let companionError='';
+  if(companion){try{reports.push({period:companion,data:await api((host.dataset.usagePage?'/api/usage?period=':'/api/reports/executive?period=')+encodeURIComponent(companion))})}catch(e){companionError='Companion report could not be loaded: '+e.message}}
+  if(!host.isConnected||$('#executivePeriod').value!==period)return;
+  reports.sort((a,b)=>Number(a.period.startsWith('Copilot - '))-Number(b.period.startsWith('Copilot - ')));
+  const sections=reports.flatMap(report=>(report.data.executive_sections||[]).map(section=>({...section,period:report.period,provider:report.period.startsWith('Copilot - ')?'Copilot':'Claude'})));
   const provider=period.startsWith("Copilot - ")?"copilot":"claude";
   host.dataset.provider=provider;
-  $("#copilotOverview")?.classList.toggle("hidden",provider==="copilot");
   const url=format=>`${host.dataset.usagePage?"/api/reports/usage":"/api/reports/executive"}?period=${encodeURIComponent(period)}&format=${format}`;
-  host.innerHTML=`<section class="usage-panel"><div class="usage-heading"><div><p class="eyebrow">${esc(data.mode||'Imported')} · ${esc(reportPeriodLabel(period))}</p><h3>${provider==='claude'?'Claude':'Microsoft 365 Copilot'}</h3></div><div class="usage-actions"><a href="${url('xlsx')}" title="Full detailed workbook: all users and individual records">Download Excel</a><a href="${url('pdf')}">Download PDF</a><a href="${url('html')}" target="_blank" rel="noopener">Print report</a></div></div><p>${esc(data.source||'')}</p>${reportFreshness(data)}${(data.top_users||[]).length?`<p>${data.user_detail_included?'Named-user detail is enabled for your role.':'User identities are pseudonymized for your role.'}</p>`:''}<div class="usage-kpis">${s.copilot_average_daily_users!=null?copilotMetrics(data):''}${s.copilot_active_users!=null?`<div class="usage-kpi"><span>Copilot active users</span><b>${s.copilot_active_users==null?'Unavailable':number(s.copilot_active_users)}</b><em>${s.copilot_interactions==null?(s.copilot_enabled_users==null?'Not part of this report':number(s.copilot_enabled_users)+' enabled users'):number(s.copilot_interactions)+' interactions'}</em></div>`:''}${s.claude_active_users!=null?`<div class="usage-kpi"><span>Claude active users</span><b>${s.claude_active_users==null?'Unavailable':number(s.claude_active_users)}</b><em>${s.claude_requests==null?'Not part of this report':number(s.claude_requests)+' API requests'}</em></div>`:''}${s.claude_usage_spend!=null?`<div class="usage-kpi"><span>Claude usage spend</span><b>${s.claude_usage_spend==null?'Unavailable':money(s.claude_usage_spend)}</b><em>Seat costs excluded</em></div>`:''}</div>${data.charts_html||''}<details class="report-notes"><summary>About this data</summary><ul>${(data.caveats||[]).map(c=>`<li>${esc(c)}</li>`).join('')}</ul></details>${(data.validation?.warnings||[]).map(w=>`<p class="error">${esc(w)}</p>`).join('')}<label>Report section<select id="executiveSection">${sections.map((x,i)=>`<option value="${i}">${esc(x.name)}</option>`).join('')}</select></label><label>Search report rows<input id="executiveSearch" type="search" placeholder="Search users or report values"></label><div id="executiveTable"></div><div class="usage-actions"><button id="executivePrev">Previous rows</button><span id="executivePage"></span><button id="executiveNext">Next rows</button></div></section>`;
-  if(!host.dataset.usagePage&&provider==='claude'){const historical='Copilot - month '+period;if([...$('#executivePeriod').options].some(o=>o.value===historical))await showCopilotOverview(historical);else $('#copilotOverview').innerHTML='<section class="usage-panel"><h2>Microsoft 365 Copilot</h2><p>No Copilot daily history is available for this month.</p></section>';}
+  host.innerHTML=`<section class="usage-panel">
+   <div class="usage-heading"><h3>Usage reports</h3></div>
+   ${reports.map(report=>reportOverview(report)).join('')}
+   ${companionError?`<p class="error">${esc(companionError)}</p>`:''}
+   <details class="report-notes"><summary>About this data</summary><ul>${reports.flatMap(report=>(report.data.caveats||[]).map(c=>`<li>${report.period.startsWith('Copilot - ')?'Copilot':'Claude'}: ${esc(c)}</li>`)).join('')}</ul></details>
+   ${reports.flatMap(report=>(report.data.validation?.warnings||[]).map(w=>`<p class="error">${esc(w)}</p>`)).join('')}
+   <div class="usage-tools"><label>Report section<select id="executiveSection">${sections.map((x,i)=>`<option value="${i}">${esc(x.provider)} - ${esc(x.name)}</option>`).join('')}</select></label>
+   <label>Search report rows<input id="executiveSearch" type="search" placeholder="Search users or report values"></label>
+   <div class="usage-actions"><a data-report-format="xlsx" href="${url('xlsx')}" title="Full detailed workbook: all users and individual records">Download Excel</a><a data-report-format="pdf" href="${url('pdf')}">Download PDF</a><a data-report-format="html" href="${url('html')}" target="_blank" rel="noopener">Print report</a></div></div>
+   <div id="executiveTable"></div><div class="usage-actions"><button id="executivePrev">Previous rows</button><span id="executivePage"></span><button id="executiveNext">Next rows</button></div></section>`;
   let offset=0;
-  function draw(){const sourceRows=sections[Number($('#executiveSection').value)]?.rows||[];const query=$('#executiveSearch').value.trim().toLowerCase();const rows=sourceRows.map((r,i)=>({r,i})).filter(({r,i})=>!query||i===0||r.some(c=>String(c??'').toLowerCase().includes(query)));const visible=rows.slice(offset,offset+30);$('#executiveTable').innerHTML=`<div class="executive-table"><table>${visible.map(({r,i})=>`<tr>${r.map((c,ci)=>`<td>${esc(executiveCell(c,sections[Number($('#executiveSection').value)]?.formats?.[i]?.[ci]))}</td>`).join('')}</tr>`).join('')}</table></div>`;$('#executivePage').textContent=rows.length?`${offset+1}–${Math.min(offset+30,rows.length)} of ${rows.length} rows`:'No detailed sections in this report';$('#executivePrev').disabled=offset===0;$('#executiveNext').disabled=offset+30>=rows.length}
+  function draw(){const selectedSection=sections[Number($('#executiveSection').value)];host.querySelectorAll('[data-report-format]').forEach(link=>{link.href=`${host.dataset.usagePage?'/api/reports/usage':'/api/reports/executive'}?period=${encodeURIComponent(selectedSection?.period||period)}&format=${link.dataset.reportFormat}`;link.textContent=(link.dataset.reportFormat==='xlsx'?'Download Excel':link.dataset.reportFormat==='pdf'?'Download PDF':'Print report')+' - '+(selectedSection?.provider||provider)});const sourceRows=sections[Number($('#executiveSection').value)]?.rows||[];const query=$('#executiveSearch').value.trim().toLowerCase();const rows=sourceRows.map((r,i)=>({r,i})).filter(({r,i})=>!query||i===0||r.some(c=>String(c??'').toLowerCase().includes(query)));const visible=rows.slice(offset,offset+30);$('#executiveTable').innerHTML=`<div class="executive-table"><table>${visible.map(({r,i})=>`<tr>${r.map((c,ci)=>`<td>${esc(executiveCell(c,sections[Number($('#executiveSection').value)]?.formats?.[i]?.[ci]))}</td>`).join('')}</tr>`).join('')}</table></div>`;$('#executivePage').textContent=rows.length?`${offset+1}–${Math.min(offset+30,rows.length)} of ${rows.length} rows`:'No detailed sections in this report';$('#executivePrev').disabled=offset===0;$('#executiveNext').disabled=offset+30>=rows.length}
   $('#executiveSearch').oninput=()=>{offset=0;draw()};$('#executiveSection').onchange=()=>{offset=0;draw()};$('#executivePrev').onclick=()=>{offset=Math.max(0,offset-30);draw()};$('#executiveNext').onclick=()=>{offset+=30;draw()};draw();
  }catch(e){host.textContent='Report could not be loaded: '+e.message}
+}
+
+function reportOverview({period,data}){
+ const copilot=period.startsWith('Copilot - '),s=data.summary||{};
+ const metrics=copilot?copilotMetrics(data):[
+  ['Claude active users',s.claude_active_users,false],['Claude requests',s.claude_requests,false],['Claude usage spend',s.claude_usage_spend,true]
+ ].map(([label,value,currency])=>`<div class="usage-kpi"><span>${label}</span><b>${value==null?'Unavailable':currency?money(value):number(value)}</b>${currency?'<em>Seat costs excluded</em>':''}</div>`).join('');
+ return `<section class="provider-overview"><h3>${copilot?'Microsoft 365 Copilot':'Claude'} - ${esc(reportPeriodLabel(period))}</h3><p>${esc(data.source||'')}</p>${reportFreshness(data)}${data.report_basis?`<p class="report-basis">${esc(data.report_basis)}</p>`:''}${data.directory_quality?`<p>Department coverage: ${number(data.directory_quality.department_mapped_active_accounts)} of ${number(data.directory_quality.active_accounts)} active accounts have a department. ${number(data.directory_quality.unmapped_active_accounts)} have no directory match.</p>`:''}${(data.top_users||[]).length?`<p>${data.user_detail_included?'Named-user detail is enabled for your role.':'User identities are pseudonymized for your role.'}</p>`:''}<div class="usage-kpis">${metrics}</div>${data.charts_html||''}</section>`;
 }
 
 function executiveCell(value,format){
@@ -150,17 +173,6 @@ function executiveCell(value,format){
  if(typeof value==='number'&&String(format||'').includes('$'))return money(value);
  if(typeof value==='number')return value.toLocaleString(undefined,{maximumFractionDigits:2});
  return value;
-}
-
-async function showCopilotOverview(period){
- const host=$('#copilotOverview');
- try{
-  const data=await api(($('#executiveReport').dataset.usagePage?'/api/usage?period=':'/api/reports/executive?period=')+encodeURIComponent(period));
-  if(!host.isConnected)return;
-  const s=data.summary||{};
-  host.innerHTML=`<section class="usage-panel"><h2>Microsoft 365 Copilot</h2><p>${esc(period)}</p>${reportFreshness(data)}<div class="usage-kpis">${copilotMetrics(data)}</div>${data.charts_html||''}<p>${esc(period.startsWith('Copilot - month ')?(data.caveats||[]).join(' '):'Rolling adoption counts, not calendar-month prompt totals. Users can appear in multiple apps.')}</p><button id="viewCopilotDetail">View Copilot details and exports</button></section>`;
-  $('#viewCopilotDetail').onclick=()=>{$('#executivePeriod').value=period;loadExecutiveReport()};
- }catch(e){if(host.isConnected)host.textContent='Copilot metrics could not be loaded: '+e.message}
 }
 
 function reportPeriodLabel(value){if(value.startsWith('Copilot - month '))return 'Copilot — '+reportPeriodLabel(value.slice(-7));return /^\d{4}-\d{2}$/.test(value)?new Date(value+'-01T00:00:00Z').toLocaleDateString(undefined,{month:'long',year:'numeric',timeZone:'UTC'}):value}
