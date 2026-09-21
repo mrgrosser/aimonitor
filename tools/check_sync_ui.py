@@ -47,11 +47,28 @@ with sync_playwright() as p:
         assert sizes['full']==2005,sizes
         assert sizes['page'] <= sizes['viewport'],sizes
     assert not errors,errors
+    pending=[]
+    page.route('**/api/cases?**',lambda route:pending.append(route))
+    page.locator('#refresh').click()
+    page.wait_for_function("document.querySelector('#refresh').getAttribute('aria-busy')==='true'")
+    assert page.locator('#refresh').is_disabled()
+    assert 'Refreshing' in page.locator('#refresh').inner_text()
+    assert page.locator('#refreshStatus').inner_text()=='Loading saved evidence…'
+    page.wait_for_timeout(50)
+    assert len(pending)==1
+    pending.pop().fulfill(json={'data':[ITEM],'mode':'live','sync':{'state':'running','last_attempt_at':'2026-09-21T17:12:49Z'}})
+    page.wait_for_function("document.querySelector('#refreshStatus').textContent.startsWith('View refreshed at')")
+    assert page.locator('#refresh').is_enabled()
+    assert page.locator('#connectionLabel').inner_text()=='Syncing'
+    assert '1 records' in page.locator('#refreshStatus').inner_text()
+    page.unroute('**/api/cases?**')
     page.route('**/api/cases?**',lambda route:route.fulfill(status=200,content_type='application/json',body=''))
     page.reload()
     page.wait_for_function("document.querySelector('#connectionLabel').textContent==='Data unavailable'")
     assert page.locator('#modeLabel').inner_text()=='Live Compliance API'
     assert 'empty response' in page.locator('#empty').inner_text()
+    assert page.locator('#refresh').is_enabled()
+    assert 'Refresh failed' in page.locator('#refreshStatus').inner_text()
     assert page.locator('#totalCount').inner_text()=='—'
     assert page.locator('#app').is_visible()
     page.unroute('**/api/cases?**')

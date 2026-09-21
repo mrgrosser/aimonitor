@@ -58,7 +58,40 @@ $('#auditClose').onclick=closeToEvidence;$('#infoClose').onclick=closeToEvidence
 $('#auditModal').addEventListener('click',e=>{if(e.target===$('#auditModal'))closeToEvidence()});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#detail').classList.contains('open'))closeDetail()});
 function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function ago(s){const d=(Date.now()-new Date(s))/1000;if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago'}
 function showEvidenceError(error){$('#connectionLabel').textContent='Data unavailable';$('#connectionLabel').title=error.message;$('#empty').textContent='Evidence could not be loaded: '+error.message;$('#empty').classList.remove('hidden');if(!all.length){for(const id of ['totalCount','openCount','criticalCount','coverageCount'])$('#'+id).textContent='—'}}
-async function load(){try{const p=new URLSearchParams({q:$('#search').value,risk:$('#risk').value,surface:$('#surface').value});const j=await api('/api/cases?'+p);appMeta=j;all=j.data;$('#connectionLabel').textContent=j.mode==='demo'?'Demo data':j.sync?.state==='ok'?'Last sync succeeded':j.sync?.state==='failed'?'Sync failed':j.sync?.state==='partial'?'Sync incomplete':'Sync pending';$('#connectionLabel').title=j.sync?.error||j.sync?.last_success_at||'';$('#modeLabel').textContent=(j.mode==='demo'?'Demo environment':'Live Compliance API')+(buildVersion?` · v${buildVersion}`:'');$('#suppressedCount').textContent=`${j.suppressed_count||0} below threshold · minimum ${j.finding_threshold||40}`;render()}catch(error){showEvidenceError(error)}}
+let evidenceRequest = 0;
+async function load(){
+    const request = ++evidenceRequest;
+    const button = $('#refresh'), feedback = $('#refreshStatus');
+    button.disabled = true;
+    button.setAttribute('aria-busy','true');
+    button.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span> Refreshing…';
+    feedback.textContent = 'Loading saved evidence…';
+    try{
+        const p = new URLSearchParams({q:$('#search').value,risk:$('#risk').value,surface:$('#surface').value});
+        const j = await api('/api/cases?'+p);
+        if(request !== evidenceRequest)return;
+        if(!Array.isArray(j.data))throw Error('The server returned an invalid evidence list. Please retry.');
+        appMeta = j; all = j.data;
+        const states = {ok:'Last sync succeeded',failed:'Sync failed',partial:'Sync incomplete',running:'Syncing'};
+        $('#connectionLabel').textContent = j.mode==='demo'?'Demo data':states[j.sync?.state]||'Sync pending';
+        $('#connectionLabel').title = j.sync?.error||(j.sync?.state==='running'?'Started '+(j.sync.last_attempt_at||''):j.sync?.last_success_at)||'';
+        $('#modeLabel').textContent = (j.mode==='demo'?'Demo environment':'Live Compliance API')+(buildVersion?` · v${buildVersion}`:'');
+        $('#suppressedCount').textContent = `${j.suppressed_count||0} below threshold · minimum ${j.finding_threshold||40}`;
+        render();
+        feedback.textContent = `View refreshed at ${new Date().toLocaleTimeString()} · ${all.length} records`;
+    }catch(error){
+        if(request !== evidenceRequest)return;
+        showEvidenceError(error);
+        feedback.textContent = 'Refresh failed. '+error.message;
+    }finally{
+        if(request === evidenceRequest){
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span> Refresh view';
+        }
+    }
+}
+
 function render(){$('#empty').textContent='No evidence matches these filters.';$('#totalCount').textContent=all.length;$('#openCount').textContent=all.filter(x=>['open','review','new'].includes(x.status)).length;$('#criticalCount').textContent=all.filter(x=>x.risk==='critical').length;$('#coverageCount').textContent=new Set(all.map(x=>x.surface)).size;$('#empty').classList.toggle('hidden',all.length>0);$('#rows').innerHTML=all.map(x=>`<tr data-id="${esc(x.id)}" class="${selected===x.id?'selected':''}"><td><span class="risk ${x.risk}">${x.risk} ${x.risk_score??''}</span></td><td><span class="title" title="${esc(x.title)}">${esc(x.title)}</span><span class="sub" title="${esc(x.id)}">${esc(x.id)}</span></td><td>${esc(x.user?.email||'Unknown')}<span class="sub">${esc(x.user?.id||'')}</span></td><td><span class="surface">${esc(x.surface)}</span></td><td>${ago(x.created_at)}<span class="sub">${new Date(x.created_at).toLocaleString()}</span></td><td>›</td></tr>`).join('');document.querySelectorAll('#rows tr').forEach(r=>r.onclick=()=>detail(r.dataset.id))}
 async function detail(id){selected=id;render();const pane=$('#detail');pane.classList.add('open');pane.scrollTop=0;drawerBackdrop().classList.add('open');pane.innerHTML='<div class="modal-message">Loading evidence…</div>';try{const x=await api('/api/cases/'+encodeURIComponent(id));const base=all.find(y=>y.id===id)||x;let msgs=x.messages||x.chat_messages||x.data||[];const contexts=(x.contexts||[]).map(c=>`<div class="message"><b>ACCESSED RESOURCE · ${esc(c.contextType||'resource')}</b>${esc(c.displayName||c.contextReference||'Referenced resource')}</div>`).join('');pane.innerHTML=`<button class="detail-close" aria-label="Close evidence detail">×</button><div class="detail-head"><span class="risk ${base.risk}">${esc(base.risk)}</span><h2>${esc(base.title)}</h2><p>${esc(base.summary)}</p>${(base.matched||[]).map(m=>`<span class="surface">${esc(m)}</span>`).join(' ')}</div><div class="meta"><div><span>User</span><b>${esc(base.user?.email)}</b></div><div><span>Surface</span><b>${esc(base.surface)}</b></div><div><span>Created</span><b>${new Date(base.created_at).toLocaleString()}</b></div><div><span>Evidence ID</span><b>${esc(base.id)}</b></div></div><div class="transcript">${x.risk_scoring_basis?`<h3>SCORING</h3><p>Keyword indicators in user-authored text; analyst review is required.</p>${(x.risk_review_notes||[]).map(n=>`<p>${esc(n)}</p>`).join('')}<p>${(x.risk_factors||[]).map(f=>`${esc(f.id)} (+${esc(f.points)})`).join(' · ')||'No scored indicators.'}</p>`:""}<h3>VERBATIM EVIDENCE</h3>${msgs.map(m=>`<div class="message ${(m.role||m.sender)==='human'?'human':''}"><b>${esc(['human','user'].includes(String(m.role||m.sender||'').toLowerCase())?(x.user?.email||base.user?.email||x.user?.displayName||'Unknown user'):(m.role||m.sender||m.type||'message'))} · ${m.created_at?new Date(m.created_at).toLocaleString():''}</b>${esc(m.text||m.content||JSON.stringify(m))}</div>`).join('')||'<p>No transcript content returned for this record.</p>'}${contexts?'<h3>ACCESSED RESOURCES</h3>'+contexts:''}<div class="actions"><a href="/api/export/${encodeURIComponent(id)}">Download evidence JSON</a></div></div>`;pane.querySelector('.detail-close').onclick=closeDetail}catch(x){pane.innerHTML=`<button class="detail-close" aria-label="Close evidence detail">×</button><div class="modal-message">${esc(x.message)}</div>`;pane.querySelector('.detail-close').onclick=closeDetail}}
 let timer;['search','risk','surface'].forEach(id=>$('#'+id).addEventListener(id==='search'?'input':'change',()=>{clearTimeout(timer);timer=setTimeout(load,250)}));

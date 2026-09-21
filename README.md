@@ -1,5 +1,9 @@
 # JO AI Monitor
 
+## Visible evidence refresh (0.11.3)
+
+Refresh view now shows a loading state, prevents repeat clicks while loading, and displays a completion time or a visible error. It reloads saved evidence and current sync status; provider collection remains a background job. Active collection is labeled Syncing. Includes the Graph audit diagnostics from 0.11.2. No migration or environment changes are required.
+
 ## Copilot failure diagnostics (0.11.2)
 
 Copilot user sync failures now retain the original Graph HTTP status, safe error code, and request ID in Access audit. Application HTTP 502 remains separate from provider status so upstream authentication errors cannot trigger logout. Existing audit entries cannot recover missing diagnostics; the next failed collection records the additional fields. No database migration or environment changes are required.
