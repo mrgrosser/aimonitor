@@ -42,7 +42,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.11.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.11.1")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -462,7 +462,7 @@ def logout(request: Request):
     response = JSONResponse({"ok": True}); response.delete_cookie("cm_session"); response.delete_cookie("jo_oauth"); return response
 
 @app.get("/api/auth/config")
-def auth_config(): return {"entra_enabled":ENTRA_ENABLED,"local_enabled":LOCAL_AUTH,"version":APP_VERSION}
+def auth_config(): return {"entra_enabled":ENTRA_ENABLED,"local_enabled":LOCAL_AUTH,"version":APP_VERSION,"mode":"demo" if DEMO else "live"}
 
 @app.get("/api/auth/entra/login")
 async def entra_login(request: Request):
@@ -605,7 +605,12 @@ async def cases(request: Request, q: str = "", risk: str = "all", surface: str =
     needle = q.lower().strip()
     result=[x for x in rows if (risk == "all" or x["risk"] == risk) and (surface == "all" or x["surface"] == surface) and (not needle or needle in json.dumps(x).lower())]
     audit(user,"findings_searched","evidence_collection",source_ip=request.client.host if request.client else "",user_agent=request.headers.get("user-agent",""),details={"query":q,"risk":risk,"surface":surface,"results":len(result)})
-    return {"data":result,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count(),"sync":dict(_finding_sync_status)}
+    # The table needs summaries only. Search still examines full evidence above;
+    # transcripts remain available through the authorized detail/export endpoints.
+    fields = ("id", "kind", "provider", "risk", "status", "created_at", "updated_at",
+              "user", "surface", "title", "summary", "matched", "risk_score", "risk_rule_version")
+    summaries = [{key: row[key] for key in fields if key in row} for row in result]
+    return {"data":summaries,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count(),"sync":dict(_finding_sync_status)}
 
 def transcript_text(value: Any) -> str:
     if isinstance(value, str): return value

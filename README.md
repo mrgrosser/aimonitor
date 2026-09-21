@@ -1,5 +1,9 @@
 # JO AI Monitor
 
+## Evidence loading fix (0.11.1)
+
+Evidence lists now return summary fields instead of full transcripts, reducing response size. Search still examines retained evidence, and detail/export endpoints preserve full content. Live/demo mode is loaded independently of evidence; empty or invalid responses display a recoverable error instead of misleading empty counts. Existing PostgreSQL deployments can rebuild and redeploy normally; no additional migration is required.
+
 ## PostgreSQL deployment (0.11.0)
 
 PostgreSQL 17 now backs every deployed application store, with pooled connections, a dedicated persistent volume, database readiness checks, and a verified SQLite migration command. Set `POSTGRES_PASSWORD` before starting Compose. **Existing deployments must migrate their SQLite data before starting the new application.** Follow [POSTGRESQL.md](POSTGRESQL.md) for the exact cutover, backup, and validation steps. Live mode no longer accepts SQLite.

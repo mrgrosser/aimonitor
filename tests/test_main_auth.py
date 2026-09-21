@@ -463,7 +463,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.11.0")
+                self.assertEqual(active.get("/health").json()["version"],"0.11.1")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
@@ -525,3 +525,29 @@ class StoredProviderViewTests(unittest.TestCase):
         self.assertEqual(main.provider_store.read("activities")["data"], [{"id": "previous"}])
         self.assertEqual(main.provider_store.read("activities")["sync"]["state"], "failed")
         self.assertEqual(main.provider_store.read("organizations")["data"], [{"id": "updated-org"}])
+
+
+class EvidenceListPayloadTests(unittest.TestCase):
+    def setUp(self):
+        _repoint_databases()
+        client.cookies.clear()
+        client.cookies.set("cm_session",main.make_token("admin",{"Compliance.Admin"}))
+
+    def test_list_omits_transcripts_but_search_and_detail_preserve_them(self):
+        row={"id":"payload-test","risk":"high","status":"new","surface":"Claude.ai",
+             "title":"Retained finding","messages":[{"role":"human","text":"needle-token "+"x"*1000000}],
+             "contexts":[{"content":"x"*1000000}]}
+        with patch.object(main,"DEMO",False), patch.object(main,"collect_findings",AsyncMock(return_value=[row])):
+            response=client.get("/api/cases?q=needle-token")
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json()["data"][0]["id"],"payload-test")
+            self.assertNotIn("messages",response.json()["data"][0])
+            self.assertNotIn("contexts",response.json()["data"][0])
+            self.assertLess(len(response.content),5000)
+            with patch.object(main,"get_finding",return_value=row):
+                detail=client.get("/api/cases/payload-test").json()
+                self.assertEqual(detail["messages"],row["messages"])
+
+    def test_auth_config_reports_actual_mode(self):
+        with patch.object(main,"DEMO",False):
+            self.assertEqual(client.get("/api/auth/config").json()["mode"],"live")

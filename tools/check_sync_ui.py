@@ -7,7 +7,7 @@ ITEM={"id":"test-record","risk":"high","title":"Test evidence","summary":"", "su
 
 def route_app(route):
     path=route.request.url.split("monitor.test",1)[-1].split("?",1)[0]
-    if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"0.9.8"})
+    if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"0.11.1","mode":"live"})
     elif path=="/api/auth/me": route.fulfill(json={"pages":["evidence","audit"]})
     elif path=="/api/cases": route.fulfill(json={"data":[ITEM],"mode":"live","sync":{"state":"partial","error":"Retry pending"}})
     elif path=="/api/cases/test-record": route.fulfill(json=ITEM)
@@ -46,6 +46,18 @@ with sync_playwright() as p:
         assert sizes['idScroll'] > sizes['idWidth'],sizes
         assert sizes['full']==2005,sizes
         assert sizes['page'] <= sizes['viewport'],sizes
+    assert not errors,errors
+    page.route('**/api/cases?**',lambda route:route.fulfill(status=200,content_type='application/json',body=''))
+    page.reload()
+    page.wait_for_function("document.querySelector('#connectionLabel').textContent==='Data unavailable'")
+    assert page.locator('#modeLabel').inner_text()=='Live Compliance API'
+    assert 'empty response' in page.locator('#empty').inner_text()
+    assert page.locator('#totalCount').inner_text()=='—'
+    assert page.locator('#app').is_visible()
+    page.unroute('**/api/cases?**')
+    page.locator('#refresh').click()
+    page.wait_for_function("document.querySelector('#totalCount').textContent==='1'")
+    assert page.locator('#empty').is_hidden()
     assert not errors,errors
     browser.close()
     print("PASS: audit HTTP details, escaped diagnostics, scoring explanations, favicon, no browser errors")
