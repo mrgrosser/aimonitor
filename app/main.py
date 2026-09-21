@@ -42,7 +42,7 @@ SECRET = os.getenv("SESSION_SECRET", "development-only-secret-change-me").encode
 API_KEY = os.getenv("ANTHROPIC_COMPLIANCE_ACCESS_KEY", "")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-APP_VERSION = os.getenv("APP_VERSION", "0.11.1")
+APP_VERSION = os.getenv("APP_VERSION", "0.11.2")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 LOCAL_AUTH = os.getenv("LOCAL_AUTH_ENABLED", "true").lower() == "true"
 
@@ -273,7 +273,21 @@ async def graph_get(url: str) -> dict[str, Any]:
     token=await graph_token()
     async with httpx.AsyncClient(timeout=45) as client:
         res=await client.get(url if url.startswith("https://") else f"https://graph.microsoft.com/v1.0{url}", headers={"Authorization":f"Bearer {token}"})
-    if res.status_code >= 400: raise HTTPException(502, f"Microsoft Graph returned HTTP {res.status_code}; collection will retry")
+    if res.status_code >= 400:
+        # Keep provider authentication failures separate from application sessions,
+        # while retaining safe diagnostics for the administrator's audit view.
+        error = HTTPException(502, f"Microsoft Graph returned HTTP {res.status_code}; collection will retry")
+        error.upstream_status = res.status_code
+        try:
+            code = res.json().get("error", {}).get("code", "")
+        except (ValueError, AttributeError):
+            code = ""
+        if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", code):
+            error.provider_error_code = code
+        request_id = res.headers.get("request-id", "")
+        if re.fullmatch(r"[A-Za-z0-9-]{1,128}", request_id):
+            error.provider_request_id = request_id
+        raise error
     return res.json()
 
 async def m365_users() -> list[dict[str,str]]:
@@ -326,6 +340,9 @@ async def m365_cases(failures: list | None = None) -> list[dict[str,Any]]:
             except (HTTPException, httpx.RequestError) as exc:
                 if failures is None: raise
                 detail={"user_id":u["id"],"status":getattr(exc,"status_code",None),"error_type":type(exc).__name__}
+                for field in ("upstream_status", "provider_error_code", "provider_request_id"):
+                    value = getattr(exc, field, None)
+                    if value is not None: detail[field] = value
                 failures.append(detail)
                 audit("system","copilot_user_sync_failed","user",str(u["id"]),details=detail)
                 return u, []

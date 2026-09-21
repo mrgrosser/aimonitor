@@ -1,5 +1,9 @@
 # JO AI Monitor
 
+## Copilot failure diagnostics (0.11.2)
+
+Copilot user sync failures now retain the original Graph HTTP status, safe error code, and request ID in Access audit. Application HTTP 502 remains separate from provider status so upstream authentication errors cannot trigger logout. Existing audit entries cannot recover missing diagnostics; the next failed collection records the additional fields. No database migration or environment changes are required.
+
 ## Evidence loading fix (0.11.1)
 
 Evidence lists now return summary fields instead of full transcripts, reducing response size. Search still examines retained evidence, and detail/export endpoints preserve full content. Live/demo mode is loaded independently of evidence; empty or invalid responses display a recoverable error instead of misleading empty counts. Existing PostgreSQL deployments can rebuild and redeploy normally; no additional migration is required.

@@ -463,7 +463,7 @@ class ReleaseAuthTests(unittest.TestCase):
     def test_startup_shutdown_and_sensitive_response_cache(self):
         with patch.object(main,"DEMO",True),patch.object(main,"run_due_report_schedules",AsyncMock()):
             with TestClient(main.app) as active:
-                self.assertEqual(active.get("/health").json()["version"],"0.11.1")
+                self.assertEqual(active.get("/health").json()["version"],"0.11.2")
                 self.assertEqual(active.get("/api/auth/config").headers["cache-control"],"no-store, no-cache, must-revalidate, max-age=0")
                 self.assertEqual(active.get("/api/cases").headers["cache-control"],"no-store")
 
@@ -551,3 +551,23 @@ class EvidenceListPayloadTests(unittest.TestCase):
     def test_auth_config_reports_actual_mode(self):
         with patch.object(main,"DEMO",False):
             self.assertEqual(client.get("/api/auth/config").json()["mode"],"live")
+
+
+class GraphAuditDiagnosticsTests(unittest.TestCase):
+    def test_original_provider_status_survives_translation_without_response_body(self):
+        import httpx
+        for status in (401,403,429,500,502):
+            async def run():
+                transport=httpx.MockTransport(lambda request:httpx.Response(status,
+                    json={"error":{"code":"AccessDenied","message":"private provider details"}},
+                    headers={"request-id":"test-request-123"}))
+                http_client=httpx.AsyncClient(transport=transport)
+                failures=[]
+                with patch.object(main,"m365_users",AsyncMock(return_value=[{"id":"test-user"}])), patch.object(main,"graph_token",AsyncMock(return_value="private-token")), patch.object(main.httpx,"AsyncClient",return_value=http_client), patch.object(main,"audit") as audit:
+                    self.assertEqual(await main.m365_cases(failures),[])
+                    self.assertEqual(failures[0]["status"],502)
+                    self.assertEqual(failures[0]["upstream_status"],status)
+                    self.assertEqual(failures[0]["provider_error_code"],"AccessDenied")
+                    self.assertEqual(failures[0]["provider_request_id"],"test-request-123")
+                    self.assertNotIn("private",json.dumps(audit.call_args.kwargs["details"]))
+            asyncio.run(run())
