@@ -3,6 +3,8 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app.report_charts import charts_html
 CHARTS=charts_html({"copilot_apps":[{"name":"Word","interactions":70},{"name":"Outlook","interactions":30}],"claude_products":[{"name":"Claude Code","spend":60},{"name":"Chat","spend":20}],"copilot_daily":[{"Date":f"2026-08-{i:02}","Interactions":i*5%37} for i in range(1,20)]})
+# Real Copilot charts, so a provider losing its own colour fails here.
+COPILOT_CHARTS=charts_html({"period":"Copilot - month 2026-08","copilot_apps":[{"name":"Teams","interactions":40},{"name":"Excel","interactions":10}],"copilot_adoption":[{"name":"Teams","users":9},{"name":"Excel","users":4}],"copilot_daily":[{"Date":f"2026-08-{i:02}","Interactions":i*3%29} for i in range(1,20)]})
 from playwright.sync_api import sync_playwright
 ROOT=Path(__file__).resolve().parents[1]/"app"/"static"
 def route_app(route):
@@ -10,7 +12,7 @@ def route_app(route):
     if path=="/api/auth/config": route.fulfill(json={"local_enabled":True,"version":"test"})
     elif path=="/api/auth/me": route.fulfill(json={"pages":["reports"],"usage_import":False})
     elif path in ("/api/reports/executive/periods","/api/usage/periods"):route.fulfill(json={"current_month":"2026-09","data":[{"period":"2026-09"},{"period":"2026-08"},{"period":"Copilot - last 30 days"},{"period":"Copilot - month 2026-08"}]})
-    elif path in ("/api/usage","/api/reports/executive") and "month" in route.request.url:route.fulfill(json={"summary":{"copilot_average_daily_users":1.5,"copilot_peak_daily_users":3,"copilot_reported_days":2,"copilot_calendar_days":31},"executive_sections":[{"name":"Copilot Daily Trend","rows":[["Date","Active accounts"],["2026-08-01",3]]}],"caveats":["2 of 31 days available"]})
+    elif path in ("/api/usage","/api/reports/executive") and "month" in route.request.url:route.fulfill(json={"summary":{"copilot_average_daily_users":1.5,"copilot_peak_daily_users":3,"copilot_reported_days":2,"copilot_calendar_days":31},"charts_html":COPILOT_CHARTS,"executive_sections":[{"name":"Copilot Daily Trend","rows":[["Date","Active accounts"],["2026-08-01",3]]}],"caveats":["2 of 31 days available"]})
     elif path in ("/api/usage","/api/reports/executive") and "Copilot" in route.request.url:route.fulfill(json={"summary":{"copilot_active_users":8,"copilot_enabled_users":12},"report_refresh_date":"2026-09-06","charts_html":"","executive_sections":[{"name":"Copilot adoption summary","rows":[["Measure","Value"],["Active users",8]]}]})
     elif path in ("/api/reports/executive","/api/usage"):route.fulfill(json={"period":"August 2026","mode":"imported","source":"Monthly workbook","summary":{"copilot_active_users":10,"copilot_interactions":100,"claude_requests":20,"claude_usage_spend":3.5},"executive_sections":[{"name":"Department Summary","rows":[["Department","Users"],["<script>bad()</script>",2]]},{"name":"Daily trend","rows":[[str(i),i] for i in range(65)]}],"user_detail_included":False,"charts_html":CHARTS})
     elif path.startswith("/api/"):route.fulfill(json={"data":[]})
@@ -39,7 +41,19 @@ with sync_playwright() as p:
     assert page.locator("#executivePage").inner_text()=="31–60 of 65 rows"
     page.locator("#executiveNext").click()
     assert page.locator("#executiveNext").is_disabled()
-    assert page.locator(".report-chart").count()==3
+    assert page.locator(".report-chart").count()==6
+    assert page.locator('.provider-overview[data-provider="claude"] .report-chart').count()==3
+    assert page.locator('.provider-overview[data-provider="copilot"] .report-chart').count()==3
+    # Both providers are on screen at once, so each must keep its own colour.
+    def paint(provider,descendant,prop):
+        section=f'.provider-overview[data-provider="{provider}"]'
+        return page.eval_on_selector(f'{section} {descendant}' if descendant else section,f'e=>getComputedStyle(e).{prop}')
+    for descendant,prop in [(".usage-kpi b","color"),(".report-chart svg polyline","stroke"),(".chart-bar i","backgroundImage"),("","borderTopColor")]:
+        claude,copilot=paint("claude",descendant,prop),paint("copilot",descendant,prop)
+        assert claude!=copilot,(descendant,prop,claude,copilot)
+    for provider in ("claude","copilot"):
+        # A line and its own data points must never disagree.
+        assert paint(provider,".report-chart svg polyline","stroke")==paint(provider,'.report-chart svg circle[r="3"]',"fill")
     assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
     assert page.locator("#executivePeriod option").all_text_contents()==["August 2026","Copilot — August 2026"]
     assert page.locator("#executiveReport h3").first.inner_text()=="Usage reports"

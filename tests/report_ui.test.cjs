@@ -28,6 +28,10 @@ test('Both providers share sections below ordered graphs, and exports follow sel
  const html=e['#executiveReport'].innerHTML;
  assert.ok(html.indexOf('Claude chart')<html.indexOf('Copilot chart'));
  assert.ok(html.indexOf('Copilot chart')<html.indexOf('id="executiveSection"'));
+ // Provider colour is styled from the section, never from the selected period.
+ assert.ok(html.includes('class="provider-overview" data-provider="claude"'));
+ assert.ok(html.includes('class="provider-overview" data-provider="copilot"'));
+ assert.ok(!html.includes('Microsoft 365 Copilot - Copilot'));
  assert.ok(html.includes('Copilot - Department Summary'));
  assert.ok(!html.includes('View Copilot details'));
  assert.ok(e['#executiveTable'].innerHTML.includes('Claude department'));
@@ -42,6 +46,8 @@ test('Historical reports and Copilot-first selection retain both providers',asyn
  const {elements:e,links,context}=harness('Copilot - month 2026-08',false);
  await context.loadExecutiveReport();
  assert.ok(e['#executiveReport'].innerHTML.includes('Claude - Department Summary'));
+ assert.ok(e['#executiveReport'].innerHTML.includes('class="provider-overview" data-provider="claude"'));
+ assert.ok(e['#executiveReport'].innerHTML.includes('class="provider-overview" data-provider="copilot"'));
  assert.ok(links.every(link=>link.href.startsWith('/api/reports/executive?period=2026-08')));
 });
 test('Companion failure preserves the available report',async()=>{
