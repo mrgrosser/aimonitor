@@ -65,6 +65,7 @@
 @media(prefers-reduced-motion:reduce){#refresh[aria-busy="true"] .refresh-icon{animation:none}}
 
 /* Shared report controls. */
+.sensitive-access-dialog{width:min(520px,calc(100% - 32px));padding:28px;border:1px solid var(--line);border-radius:12px;background:var(--bg,#fff);color:var(--ink);box-shadow:0 24px 80px #0006}.sensitive-access-dialog::backdrop{background:#0009}.sensitive-access-dialog h2{margin:0 0 16px}.sensitive-access-dialog p{line-height:1.6;color:var(--muted)}.sensitive-access-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px}.sensitive-access-actions button{padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink)}.sensitive-access-actions [data-continue]{background:#315fdc;color:white}
 .usage-panel > .usage-tools { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 1.5rem 0; }
 .usage-panel > .usage-tools label { display: flex; flex-direction: column; gap: .4rem; }
 .usage-panel > .usage-tools .usage-actions { display: flex; flex-wrap: wrap; gap: .75rem; }

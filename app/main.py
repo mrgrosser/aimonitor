@@ -616,6 +616,21 @@ def generate_usage_alerts(data: dict[str,Any]) -> list[dict[str,Any]]:
     connectors=[] if DEMO or data.get("mode")=="demo" else [item["id"] for item in connector_health() if item["configured"]]
     return materialize_alerts(usage_alerts(data),connectors)
 
+def evidence_topic(row: dict) -> str:
+    """Return fixed topic labels without copying sensitive request text."""
+    text = " ".join(str(row.get(key) or "") for key in ("title", "messages", "surface")).casefold()
+    for pattern, label in (
+        (r"\b(employee|personnel|hiring|hire|fire|firing|termination|hr)\b", "Employee interaction"),
+        (r"\b(powerpoint|presentation|slides?|pptx?)\b", "PowerPoint question"),
+        (r"\b(excel|spreadsheet|workbook)\b", "Spreadsheet question"),
+        (r"\b(outlook|email|e-mail)\b", "Email assistance"),
+        (r"\b(word|document|paragraph|rewrite)\b", "Document assistance"),
+        (r"\b(code|coding|cowork|script|debug|programming)\b", "Coding / workspace interaction"),
+    ):
+        if re.search(pattern, text): return label
+    return "General AI interaction"
+
+
 @app.get("/api/cases")
 async def cases(request: Request, q: str = "", risk: str = "all", surface: str = "all", user: str = Depends(current_user)):
     rows=await collect_findings()
@@ -625,8 +640,16 @@ async def cases(request: Request, q: str = "", risk: str = "all", surface: str =
     # The table needs summaries only. Search still examines full evidence above;
     # transcripts remain available through the authorized detail/export endpoints.
     fields = ("id", "kind", "provider", "risk", "status", "created_at", "updated_at",
-              "user", "surface", "title", "summary", "matched", "risk_score", "risk_rule_version")
-    summaries = [{key: row[key] for key in fields if key in row} for row in result]
+              "user", "surface", "risk_score", "risk_rule_version")
+    summaries = []
+    for row in result:
+        summary = {key: row[key] for key in fields if key in row}
+        summary["title"] = evidence_topic(row)
+        score = row.get("risk_score")
+        count = len(row.get("risk_factors") or [])
+        summary["summary"] = (f"Risk score: {score}/100 · {count} scoring indicator{'s' if count != 1 else ''}"
+                              if score is not None else "Not yet scored · Review required")
+        summaries.append(summary)
     return {"data":summaries,"mode":"demo" if DEMO else "live","finding_threshold":active_policy()["finding_threshold"],"policy_version":active_policy()["version"],"suppressed_count":suppressed_count(),"sync":dict(_finding_sync_status)}
 
 def transcript_text(value: Any) -> str:

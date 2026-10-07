@@ -545,10 +545,25 @@ class EvidenceListPayloadTests(unittest.TestCase):
             self.assertEqual(response.json()["data"][0]["id"],"payload-test")
             self.assertNotIn("messages",response.json()["data"][0])
             self.assertNotIn("contexts",response.json()["data"][0])
+            self.assertEqual(response.json()["data"][0]["title"], "General AI interaction")
+            self.assertEqual(response.json()["data"][0]["summary"], "Not yet scored · Review required")
             self.assertLess(len(response.content),5000)
             with patch.object(main,"get_finding",return_value=row):
                 detail=client.get("/api/cases/payload-test").json()
                 self.assertEqual(detail["messages"],row["messages"])
+
+    def test_sensitive_title_is_replaced_with_topic_and_score(self):
+        row = {"id":"sensitive", "risk":"high", "surface":"Claude.ai",
+               "title":"Hey, how do I fire Gary?", "summary":"<b>Gary</b>",
+               "matched":["Gary"], "risk_score":65, "risk_factors":[{"id":"hr", "points":65}]}
+        with patch.object(main,"collect_findings",AsyncMock(return_value=[row])):
+            response = client.get("/api/cases")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"][0]
+        self.assertEqual(data["title"], "Employee interaction")
+        self.assertEqual(data["summary"], "Risk score: 65/100 · 1 scoring indicator")
+        self.assertNotIn("Gary", response.text)
+        self.assertNotIn("matched", data)
 
     def test_auth_config_reports_actual_mode(self):
         with patch.object(main,"DEMO",False):
